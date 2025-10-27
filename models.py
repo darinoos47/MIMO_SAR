@@ -1,67 +1,36 @@
 import torch
 import torch.nn as nn
-from utils import complex_matmul, complex_conj_transpose_matmul
+from utils import (
+    complex_matmul, complex_conj_transpose_matmul,
+    complex_matmul_tensor, complex_batch_matmul_vec,
+    complex_batch_inverse, complex_project_l2_ball
+)
 
 # -----------------------------------------------------------------
-# PHASE 2 (From previous step)
+# 1. CNN Denoiser (Unchanged)
 # -----------------------------------------------------------------
 class CNNDenoiser(nn.Module):
     """
     Implements the CNN-based denoiser with a residual architecture
-    as shown in Fig. 8 of the paper. [cite: 379-385, 395]
-    
-    The network operates on the 1D angular reflectivity profile 'x',
-    which is represented as a 2-channel tensor (real, imag).
-    
-    Input shape: [batch_size, 2, N_theta]
-    Output shape: [batch_size, 2, N_theta]
+    [cite_start]as shown in Fig. 8 of the paper. [cite: 379-385, 395]
     """
     def __init__(self, in_channels=2, out_channels=2, num_filters=32, kernel_size=3):
         super(CNNDenoiser, self).__init__()
-        
-        # Padding is (kernel_size - 1) / 2 = (3-1)/2 = 1 to keep size same
         padding = (kernel_size - 1) // 2
         
-        # First convolutional block [cite: 379-381]
         self.conv_block_1 = nn.Sequential(
-            nn.Conv1d(
-                in_channels=in_channels, 
-                out_channels=num_filters, 
-                kernel_size=kernel_size, 
-                padding=padding,
-                bias=False 
-            ),
-            nn.BatchNorm1d(num_features=num_filters),
+            nn.Conv1d(in_channels, num_filters, kernel_size, padding=padding, bias=False),
+            nn.BatchNorm1d(num_filters),
             nn.ReLU(inplace=True)
         )
-        
-        # Second convolutional block [cite: 382-384]
         self.conv_block_2 = nn.Sequential(
-            nn.Conv1d(
-                in_channels=num_filters,
-                out_channels=num_filters,
-                kernel_size=kernel_size,
-                padding=padding,
-                bias=False
-            ),
-            nn.BatchNorm1d(num_features=num_filters),
+            nn.Conv1d(num_filters, num_filters, kernel_size, padding=padding, bias=False),
+            nn.BatchNorm1d(num_filters),
             nn.ReLU(inplace=True)
         )
-        
-        # Final convolutional layer [cite: 385]
-        self.conv_final = nn.Conv1d(
-            in_channels=num_filters,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            padding=padding,
-            bias=True 
-        )
+        self.conv_final = nn.Conv1d(num_filters, out_channels, kernel_size, padding=padding, bias=True)
 
     def forward(self, x):
-        """
-        Forward pass with the residual connection.
-        The output of the blocks is added back to the input. [cite: 395]
-        """
         identity = x
         out = self.conv_block_1(x)
         out = self.conv_block_2(out)
@@ -69,102 +38,152 @@ class CNNDenoiser(nn.Module):
         return identity + out
 
 # -----------------------------------------------------------------
-# PHASE 3 (New code)
+# 2. New ADMM-based Data Consistency Layer
 # -----------------------------------------------------------------
-class DCLayer(nn.Module):
+class DCLayer_ADMM(nn.Module):
     """
-    Implements the Data Consistency (DC) layer.
+    Implements the Data Consistency (DC) layer using N steps of ADMM
+    to solve:
+    arg min_x (1/2)||x - r_n||^2  s.t. ||y - Ax||_2 <= epsilon
     
-    This layer performs one step of gradient descent on the data fidelity
-    term:  L(x) = ||y - Ax||^2
-    
-    The update is: x_out = x_in - mu * grad(L(x_in))
-    grad(L(x_in)) = A.H @ (A @ x_in - y)
-    
-    So: x_out = x_in - mu * A.H @ (A @ x_in - y)
-    
-    where 'mu' is a learnable step-size parameter.
+    Where r_n is the output of the denoiser.
     """
-    def __init__(self, A_tensor):
-        super(DCLayer, self).__init__()
+    def __init__(self, A_tensor, N_admm_steps=3):
+        super(DCLayer_ADMM, self).__init__()
+        self.N_admm_steps = N_admm_steps
         
-        # Register 'A' as a non-trainable buffer
+        # Learnable parameters (in log-space for stability)
+        # rho: ADMM penalty parameter
+        # epsilon: l2-ball radius
+        self.log_rho = nn.Parameter(torch.log(torch.tensor(1.0)))
+        self.log_epsilon = nn.Parameter(torch.log(torch.tensor(0.01)))
+        
+        # Store A (shape [2, N_v, N_theta])
         self.register_buffer('A', A_tensor)
         
-        # 'mu' is a learnable parameter, initialized to a small value
-        self.mu = nn.Parameter(torch.tensor(0.1))
+        # Precompute A_H (shape [2, N_theta, N_v])
+        A_H = torch.stack((A_tensor[0].T, -A_tensor[1].T), dim=0)
+        self.register_buffer('A_H', A_H)
+        
+        # Precompute A @ A.H (shape [2, N_v, N_v])
+        A_A_H = complex_matmul_tensor(A_tensor, A_H)
+        self.register_buffer('A_A_H', A_A_H)
 
-    def forward(self, x_in, y):
+    def forward(self, r_n, y, u_in):
         """
-        x_in: [batch, 2, N_theta] (current estimate of x from denoiser)
-        y:    [batch, 2, N_v]     (original measurement vector)
+        r_n:   [batch, 2, N_theta] (denoiser output)
+        y:     [batch, 2, N_v]     (original measurement)
+        u_in:  [batch, 2, N_v]     (dual variable from prev iter)
+        
+        Returns:
+        x_out: [batch, 2, N_theta]
+        u_out: [batch, 2, N_v]
         """
+        # Get scalar parameters
+        rho = torch.exp(self.log_rho)
+        epsilon = torch.exp(self.log_epsilon)
         
-        # 1. Project to measurement domain: A @ x_in
-        Ax = complex_matmul(self.A, x_in)
+        # --- Precompute fixed part of x-update (SMW identity) ---
+        # M = (A @ A.H + rho * I)
+        I = torch.eye(self.A.shape[1], device=r_n.device) # N_v x N_v
+        I_tensor = torch.stack((I, torch.zeros_like(I)), dim=0).unsqueeze(0)
+        M = self.A_A_H.unsqueeze(0) + rho * I_tensor
         
-        # 2. Compute residual in measurement domain: (A @ x_in - y)
-        residual = Ax - y
+        # M_inv = (A @ A.H + rho * I)^-1
+        M_inv = complex_batch_inverse(M)
         
-        # 3. Project residual back to image domain: A.H @ (A @ x_in - y)
-        correction = complex_conj_transpose_matmul(self.A, residual)
+        # --- Initialize ADMM variables ---
+        u = u_in
+        z = y # Start z close to y
         
-        # 4. Perform the gradient descent update
-        # We constrain mu to be positive using relu
-        x_out = x_in - torch.relu(self.mu) * correction
-        
-        return x_out
+        # --- Run N_admm_steps ---
+        for _ in range(self.N_admm_steps):
+            
+            # 1. x-update (using SMW)
+            # x = (I + rho*A.H*A)^-1 @ (r_n + rho*A.H*(z-u))
+            # x = 1/rho * (rhs - A.H @ (A.H*A+rho*I)^-1 @ A @ rhs)
+            
+            # Let rhs = (r_n + rho * A.H @ (z - u))
+            z_minus_u = z - u
+            A_H_z_u = complex_conj_transpose_matmul(self.A.unsqueeze(0), z_minus_u)
+            rhs = r_n + rho * A_H_z_u
+            
+            # temp_x = rhs / rho
+            temp_x = rhs / (rho + 1e-8)
+            
+            # temp_M_inv_Ax = M_inv @ (A @ temp_x)
+            A_temp_x = complex_matmul(self.A.unsqueeze(0), temp_x)
+            temp_M_inv_Ax = complex_batch_matmul_vec(M_inv, A_temp_x)
+            
+            # x = temp_x - A.H @ temp_M_inv_Ax
+            x = temp_x - complex_conj_transpose_matmul(self.A.unsqueeze(0), temp_M_inv_Ax)
 
+            # 2. z-update
+            # z = project(A @ x + u) onto l2-ball(y, epsilon)
+            Ax = complex_matmul(self.A.unsqueeze(0), x)
+            Ax_plus_u = Ax + u
+            z = complex_project_l2_ball(Ax_plus_u, y, epsilon)
+
+            # 3. u-update
+            # u = u + A @ x - z
+            u = u + Ax - z
+            
+        return x, u
+
+# -----------------------------------------------------------------
+# 3. Updated DBP Network
+# -----------------------------------------------------------------
 class DBPNet(nn.Module):
     """
     Implements the full unrolled Deep Basis Pursuit (DBP) network
-    as shown in Fig. 7. [cite: 363]
+    as shown in Fig. 7.
     
-    It alternates between a shared CNNDenoiser (28a) and a DCLayer (28b)
-    for a fixed number of iterations.
+    This is now a STATEFUL network that passes the ADMM dual
+    variable 'u' between iterations.
     """
-    def __init__(self, A_tensor, num_iterations=5):
+    def __init__(self, A_tensor, num_iterations=5, N_admm_steps=3):
         super(DBPNet, self).__init__()
         self.num_iterations = num_iterations
         
-        # Register A and A.H as non-trainable buffers
+        # Register A as a non-trainable buffer for the initial step
         self.register_buffer('A', A_tensor)
-        A_H_tensor = torch.stack((A_tensor[0].T, -A_tensor[1].T), dim=0)
-        self.register_buffer('A_H', A_H_tensor)
         
-        # 1. The single, shared CNN-based denoiser (28a) [cite: 562]
-        #    Weights are shared across all iterations. [cite: 573]
+        # 1. The single, shared CNN-based denoiser (28a)
         self.denoiser = CNNDenoiser()
         
-        # 2. A list of Data Consistency (DC) layers (28b) [cite: 564]
-        #    Each layer has its own learnable step-size 'mu'.
+        # 2. A list of stateful ADMM-based Data Consistency layers
         self.dc_layers = nn.ModuleList(
-            [DCLayer(A_tensor) for _ in range(num_iterations)]
+            [DCLayer_ADMM(A_tensor, N_admm_steps) for _ in range(num_iterations)]
         )
 
     def forward(self, y):
         """
-        Forward pass through the unrolled network.
+        Forward pass through the unrolled, stateful network.
         
         y: [batch, 2, N_v] (original measurement vectors)
         """
         
-        # 1. Get initial estimate x_0 = A.H @ y (Matched Filter) [cite: 769]
-        x = complex_conj_transpose_matmul(self.A, y)
+        # 1. Get initial estimate x_0 = A.H @ y (Matched Filter)
+        x = complex_conj_transpose_matmul(self.A.unsqueeze(0), y)
         
-        # 2. Unroll the iterations
+        # 2. Initialize the ADMM dual variable 'u'
+        u = torch.zeros_like(y)
+        
+        # 3. Unroll the iterations
         for i in range(self.num_iterations):
-            # Denoising step (r_n = D_w(x_{n-1})) [cite: 562]
+            # Denoising step (r_n = D_w(x_{n-1}))
             r = self.denoiser(x)
             
-            # Data Consistency step (x_n = ...) [cite: 564, 570]
-            x = self.dc_layers[i](r, y)
+            # Stateful Data Consistency step (x_n, u_n = ...)
+            x, u = self.dc_layers[i](r, y, u)
             
         return x
 
 # --- Example Usage (main block) ---
 if __name__ == '__main__':
     from data_loader import MIMOSAR_Dataset, DataLoader
+    
+    print("--- Testing new ADMM-based DBPNet ---")
     
     # 1. Load the dataset to get 'A'
     dataset = MIMOSAR_Dataset('../FL_MIMO_SAR_data.mat')
@@ -174,18 +193,16 @@ if __name__ == '__main__':
     dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
     y_batch = next(iter(dataloader))
 
-    # 3. Initialize the DBPNet model
-    model = DBPNet(A_tensor, num_iterations=5)
+    # 3. Initialize the DBPNet model with N_admm_steps=3
+    model = DBPNet(A_tensor, num_iterations=5, N_admm_steps=3)
     
     # 4. Pass the batch through the model
     x_hat = model(y_batch)
     
-    print("\n--- DBPNet Test ---")
     print(f"Steering Matrix 'A' shape: {list(A_tensor.shape)}")
     print(f"Input 'y' batch shape:  {list(y_batch.shape)}")
     print(f"Output 'x' batch shape: {list(x_hat.shape)}")
     
-    # Check that output shape is correct
     assert list(x_hat.shape) == [
         y_batch.shape[0], 2, A_tensor.shape[2]
     ]

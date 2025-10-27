@@ -30,6 +30,7 @@ class MIMOSAR_Dataset(Dataset):
     def __init__(self, mat_file_path):
         print(f"Loading data from {mat_file_path}...")
         try:
+            print(f"mat_file_path is: {mat_file_path}")
             data = scipy.io.loadmat(mat_file_path)
         except NotImplementedError:
             print("Failed to read .mat file. Trying with h5py...")
@@ -52,6 +53,9 @@ class MIMOSAR_Dataset(Dataset):
         # measurements shape from MATLAB: (N_r, N_v, N_l)
         # N_r = num_samples (range), N_v = virtual_ant_num, N_l = scan_steps
         measurements = data['received_signals_fft']
+        
+        if measurements.ndim == 2:
+            measurements = measurements[:, :, np.newaxis]
         
         # We want our dataset to be a flat list of all (N_r * N_l) measurements.
         # Each measurement is a vector of length N_v.
@@ -95,7 +99,7 @@ class MIMOSAR_Dataset(Dataset):
 if __name__ == '__main__':
     
     # 1. Create the Dataset
-    dataset = MIMOSAR_Dataset('FL_MIMO_SAR_data.mat')
+    dataset = MIMOSAR_Dataset('./FL_MIMO_SAR_data.mat')
     
     # 2. Create the DataLoader
     # This will batch the samples for training
