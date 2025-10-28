@@ -13,18 +13,23 @@ def complex_matmul(A_tensor, x_tensor):
     """
     Performs complex matrix-vector multiplication: y = A @ x (batch-wise)
     
-    A_tensor: [1, 2, N_v, N_theta] (complex matrix A)
+    A_tensor: [1, 2, N_v, N_theta] (complex matrix A, batched)
     x_tensor: [batch, 2, N_theta] (complex vector x)
     
     Returns:
     y_tensor: [batch, 2, N_v] (complex vector y)
     """
-    A_r = A_tensor[:, 0, :, :]  # [1, N_v, N_theta]
-    A_i = A_tensor[:, 1, :, :]  # [1, N_v, N_theta]
+    # <<< FIX HERE: Get batch_size from x_tensor >>>
+    batch_size = x_tensor.shape[0]
+
+    # <<< FIX HERE: Expand A to match the batch size of x >>>
+    A_r = A_tensor[:, 0, :, :].expand(batch_size, -1, -1)  # [batch, N_v, N_theta]
+    A_i = A_tensor[:, 1, :, :].expand(batch_size, -1, -1)  # [batch, N_v, N_theta]
     
     x_r = x_tensor[:, 0, :].unsqueeze(1)  # [batch, 1, N_theta]
     x_i = x_tensor[:, 1, :].unsqueeze(1)  # [batch, 1, N_theta]
 
+    # This bmm is now valid: [batch, N_v, N_theta] @ [batch, N_theta, 1]
     y_r = torch.bmm(A_r, x_r.transpose(1, 2)) - torch.bmm(A_i, x_i.transpose(1, 2))
     y_i = torch.bmm(A_r, x_i.transpose(1, 2)) + torch.bmm(A_i, x_r.transpose(1, 2))
     
@@ -34,14 +39,18 @@ def complex_conj_transpose_matmul(A_tensor, y_tensor):
     """
     Performs complex conj-transpose matrix-vector multiplication: x = A.H @ y
     
-    A_tensor: [1, 2, N_v, N_theta] (complex matrix A)
+    A_tensor: [1, 2, N_v, N_theta] (complex matrix A, batched)
     y_tensor: [batch, 2, N_v] (complex vector y)
     
     Returns:
     x_tensor: [batch, 2, N_theta] (complex vector x)
     """
-    A_r_T = A_tensor[:, 0, :, :].transpose(1, 2)  # [1, N_theta, N_v]
-    A_i_T = A_tensor[:, 1, :, :].transpose(1, 2)  # [1, N_theta, N_v]
+    # <<< FIX HERE: Get batch_size from y_tensor >>>
+    batch_size = y_tensor.shape[0]
+
+    # <<< FIX HERE: Expand A.T to match the batch size of y >>>
+    A_r_T = A_tensor[:, 0, :, :].transpose(1, 2).expand(batch_size, -1, -1)  # [batch, N_theta, N_v]
+    A_i_T = A_tensor[:, 1, :, :].transpose(1, 2).expand(batch_size, -1, -1)  # [batch, N_theta, N_v]
 
     y_r = y_tensor[:, 0, :].unsqueeze(1)  # [batch, 1, N_v]
     y_i = y_tensor[:, 1, :].unsqueeze(1)  # [batch, 1, N_v]
@@ -56,7 +65,7 @@ def complex_conj_transpose_matmul(A_tensor, y_tensor):
     return torch.cat((x_r.squeeze(-1).unsqueeze(1), x_i.squeeze(-1).unsqueeze(1)), dim=1)
 
 
-# --- New Functions for ADMM Layer ---
+# --- New Functions for ADMM Layer (Unchanged) ---
 
 def complex_matmul_tensor(A, B):
     """
@@ -141,3 +150,33 @@ def complex_project_l2_ball(v, center, radius):
     
     # z = center + d * scale
     return center + d_tensor * scale
+
+# --- New Function for Adjoint Test (from previous step) ---
+
+def complex_inner_product(a, b):
+    """
+    Computes the complex inner product <a, b> = sum(a_conj * b)
+    for a batch of vectors.
+    
+    a, b: [batch, 2, N]
+    Returns:
+    product: [batch, 2] (a batch of complex scalars)
+    """
+    
+    # a_conj: [batch, 2, N]
+    a_conj = torch.stack((a[:, 0], -a[:, 1]), dim=1)
+    
+    # (a_r - j*a_i) * (b_r + j*b_i) = (a_r*b_r + a_i*b_i) + j*(a_r*b_i - a_i*b_r)
+    
+    # prod_r = a_conj_r * b_r - a_conj_i * b_i
+    prod_r = a_conj[:, 0, :] * b[:, 0, :] - a_conj[:, 1, :] * b[:, 1, :]
+    
+    # prod_i = a_conj_r * b_i + a_conj_i * b_r
+    prod_i = a_conj[:, 0, :] * b[:, 1, :] + a_conj[:, 1, :] * b[:, 0, :]
+    
+    # Sum over the N dimension
+    sum_r = torch.sum(prod_r, dim=1)
+    sum_i = torch.sum(prod_i, dim=1)
+    
+    # Return as a [batch, 2] complex scalar
+    return torch.stack((sum_r, sum_i), dim=1)
