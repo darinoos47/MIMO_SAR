@@ -15,10 +15,13 @@ MAT_FILE = 'FL_MIMO_SAR_data.mat'
 MODEL_SAVE_PATH = 'dbp_model.pth'
 
 # Training Hyperparameters
-NUM_EPOCHS = 20
+NUM_EPOCHS = 100
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-4
-NUM_DBP_ITERATIONS = 5 # Number of unrolled iterations in the network
+
+# Model Hyperparameters
+NUM_UNROLLS = 5      # N1 in the paper: total unrolled iterations
+NUM_ADMM_STEPS = 3   # N2 in the paper: internal ADMM steps
 
 # -----------------------------------------------------------------
 # 2. Setup
@@ -44,18 +47,27 @@ def main():
     
     # Get steering matrix A and move it to the device
     A_tensor = dataset.A.to(device)
+    # Add a 'batch' dimension for our matmul functions
+    A_batch_tensor = A_tensor.unsqueeze(0) 
 
     # -----------------------------------------------------------------
     # 4. Initialize Model, Loss, and Optimizer
     # -----------------------------------------------------------------
     print("Initializing model...")
-    model = DBPNet(A_tensor, num_iterations=NUM_DBP_ITERATIONS).to(device)
+    model = DBPNet(
+        A_tensor, 
+        num_iterations=NUM_UNROLLS, 
+        N_admm_steps=NUM_ADMM_STEPS
+    ).to(device)
 
-    # Loss function (in measurement domain, as per paper )
+    # [cite_start]Loss function (in measurement domain, as per paper [cite: 581-584, 1137-1138])
+    # This is the Euclidean norm loss: L = ||y_hat - y||_2^2
     criterion = nn.MSELoss()
     
     # Optimizer (Adam)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    
+    print(f"Model Parameters:\n  Num Unrolls (N1): {NUM_UNROLLS}\n  Num ADMM Steps (N2): {NUM_ADMM_STEPS}")
 
     # -----------------------------------------------------------------
     # 5. Training Loop
@@ -75,12 +87,14 @@ def main():
             # 1. Get the estimated reflectivity x_hat from the model
             x_hat_batch = model(y_batch)
             
-            # 2. Project x_hat back to measurement domain [cite: 583]
+            # 2. Project x_hat back to measurement domain
             # y_hat = A * x_hat
-            y_hat_batch = complex_matmul(A_tensor, x_hat_batch)
             
-            # 3. Compute the unsupervised loss in the measurement domain [cite: 583]
-            # Loss = || y - y_hat ||^2
+            # <<< FIX WAS HERE: Use A_batch_tensor (4D) not A_tensor (3D) >>>
+            y_hat_batch = complex_matmul(A_batch_tensor, x_hat_batch)
+            
+            # 3. Compute the unsupervised loss in the measurement domain
+            # Loss = || y_hat - y ||^2
             loss = criterion(y_hat_batch, y_batch)
             
             # --- Backward Pass and Optimization ---
