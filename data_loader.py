@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import scipy.io
 import numpy as np
+import h5py
 
 def to_tensor(data):
     """
@@ -9,81 +10,85 @@ def to_tensor(data):
     (channel 0: real, channel 1: imag).
     """
     if np.iscomplexobj(data):
-        # Stack real and imag parts as channels
         data_real = data.real.astype(np.float32)
         data_imag = data.imag.astype(np.float32)
         return torch.from_numpy(np.stack((data_real, data_imag), axis=0))
     else:
-        # If already real, just convert
         return torch.from_numpy(data.astype(np.float32))
+
+def load_mat_file(filepath):
+    """
+    Loads .mat file, handling v7.3 files with h5py,
+    correcting for transposes and complex structs.
+    """
+    try:
+        data = scipy.io.loadmat(filepath)
+    except NotImplementedError:
+        print(f"Reading v7.3 MAT file {filepath} with h5py...")
+        data = {}
+        with h5py.File(filepath, 'r') as f:
+            for k in f.keys():
+                v = f[k]
+                # Handle transpose: h5py loads as [dim1, dim0]
+                # We need [dim0, dim1]
+                if v.ndim == 2:
+                    v = v[()] # Load data
+                    v = v.T    # Transpose back to MATLAB's shape
+                else:
+                    v = v[()] # Load data
+                
+                # Handle complex data saved as a struct
+                if v.dtype.names and ('real' in v.dtype.names) and ('imag' in v.dtype.names):
+                    v = v['real'] + 1j * v['imag']
+                
+                data[k] = v
+    return data
 
 class MIMOSAR_Dataset(Dataset):
     """
     Custom PyTorch Dataset for loading the FL-MIMO-SAR data.
     
+    FOR FULL UNSUPERVISED TRAINING
+    
     Each item is a single measurement vector 'y' from one range bin 
     at one aperture step.
-    
-    The complex vector y of shape [N_v] is returned as a
-    real tensor of shape [2, N_v].
     """
     def __init__(self, mat_file_path):
         print(f"Loading data from {mat_file_path}...")
-        try:
-            print(f"mat_file_path is: {mat_file_path}")
-            data = scipy.io.loadmat(mat_file_path)
-        except NotImplementedError:
-            print("Failed to read .mat file. Trying with h5py...")
-            import h5py
-            data = {}
-            with h5py.File(mat_file_path, 'r') as f:
-                data['A'] = f['A'][()]
-                data['received_signals_fft'] = f['received_signals_fft'][()]
-                # object is optional for unsupervised training
-                if 'object' in f:
-                    data['object'] = f['object'][()]
-            
-            # h5py might load as (imag, real), fix if necessary
-            if data['A'].dtype.names:
-                 data['A'] = data['A']['real'] + 1j * data['A']['imag']
-            if data['received_signals_fft'].dtype.names:
-                data['received_signals_fft'] = data['received_signals_fft']['real'] + 1j * data['received_signals_fft']['imag']
+        print(f"mat_file_path is: {mat_file_path}") # Added for clarity
+        data = load_mat_file(mat_file_path)
 
-
-        # measurements shape from MATLAB: (N_r, N_v, N_l)
-        # N_r = num_samples (range), N_v = virtual_ant_num, N_l = scan_steps
+        # 1. Load Measurements 'y'
+        #    MATLAB shape is [N_samples, N_v] -> [2000, 8]
         measurements = data['received_signals_fft']
         
-        if measurements.ndim == 2:
-            measurements = measurements[:, :, np.newaxis]
-        
-        # We want our dataset to be a flat list of all (N_r * N_l) measurements.
-        # Each measurement is a vector of length N_v.
-        #
-        # 1. Transpose from (N_r, N_v, N_l) to (N_l, N_r, N_v)
-        #    This groups by aperture step, then range bin.
-        measurements_transposed = np.transpose(measurements, (2, 0, 1))
-        
-        # 2. Reshape to (N_l * N_r, N_v)
-        self.num_samples = measurements.shape[0] * measurements.shape[2]
-        self.num_virtual_ant = measurements.shape[1]
-        self.data = measurements_transposed.reshape(self.num_samples, self.num_virtual_ant)
-        
-        # Store steering matrix 'A'
-        self.A_complex = data['A'].astype(np.complex64)
-        self.A = to_tensor(self.A_complex) # Shape [2, N_v, N_theta]
+        if measurements.ndim == 3:
+            # Transpose from (N_r, N_v, N_l) to (N_l, N_r, N_v)
+            measurements_transposed = np.transpose(measurements, (2, 0, 1))
+        else:
+            # It's 2D (N_samples, N_v), so just add an N_l dimension
+            measurements_transposed = measurements.reshape(1, measurements.shape[0], measurements.shape[1])
 
+        # 2. Reshape to a flat list of samples
+        #    Shape becomes [N_l * N_samples, N_v]
+        self.data = measurements_transposed.reshape(-1, measurements_transposed.shape[-1])
+        
+        self.num_samples = self.data.shape[0]
+        self.num_virtual_ant = self.data.shape[1]
+        
+        # 3. Load Steering Matrix 'A'
+        #    MATLAB shape is [N_v, N_theta] -> [8, 1001]
+        self.A_complex = data['A'].astype(np.complex64)
+        self.A = to_tensor(self.A_complex) # Shape [2, 8, 1001]
         self.num_angle_bins = self.A.shape[2]
         
         print(f"Data loaded successfully.")
-        print(f"  Total training samples (N_l * N_r): {self.num_samples}")
+        print(f"  Total training samples: {self.num_samples}")
         print(f"  Virtual antennas (N_v): {self.num_virtual_ant}")
         print(f"  Angle bins (N_theta): {self.num_angle_bins}")
         print(f"  Steering matrix 'A' shape: {list(self.A.shape)}")
 
-
     def __len__(self):
-        # Total number of samples (N_l * N_r)
         return self.num_samples
 
     def __getitem__(self, idx):
@@ -94,25 +99,3 @@ class MIMOSAR_Dataset(Dataset):
         y_tensor = to_tensor(y_complex)
         
         return y_tensor
-
-# --- Example Usage (main block) ---
-if __name__ == '__main__':
-    
-    # 1. Create the Dataset
-    dataset = MIMOSAR_Dataset('./FL_MIMO_SAR_data.mat')
-    
-    # 2. Create the DataLoader
-    # This will batch the samples for training
-    dataloader = DataLoader(
-        dataset=dataset,
-        batch_size=32,
-        shuffle=True,
-        num_workers=0
-    )
-    
-    # 3. Test by fetching one batch
-    y_batch = next(iter(dataloader))
-    
-    print("\n--- DataLoader Test ---")
-    print(f"Batch shape: {list(y_batch.shape)}")
-    print(f"(Batch_size, Channels, N_v)")

@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import os
+import matplotlib.pyplot as plt
+import numpy as np
+import time
 
 from data_loader import MIMOSAR_Dataset
 from models import DBPNet
@@ -15,7 +18,7 @@ MAT_FILE = 'FL_MIMO_SAR_data.mat'
 MODEL_SAVE_PATH = 'dbp_model.pth'
 
 # Training Hyperparameters
-NUM_EPOCHS = 100
+NUM_EPOCHS = 400
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-4
 
@@ -76,6 +79,8 @@ def main():
     
     model.train() # Set the model to training mode
     
+    tic = time.time()
+    
     for epoch in range(NUM_EPOCHS):
         epoch_loss = 0.0
         
@@ -115,6 +120,68 @@ def main():
         # Print average loss for the epoch
         avg_epoch_loss = epoch_loss / len(dataloader)
         print(f"*** Epoch {epoch+1} Complete. Average Loss: {avg_epoch_loss:.6f} ***")
+
+    toc = time.time()
+    print(f"Total Training time is: {toc-tic} seconds")
+
+    # Debug code - start
+    print("Generating debug plots of the last training batch...")
+    with torch.no_grad():
+        # <<< NEW: Plotting Parameters (from MATLAB script) >>>
+        NUM_ANGLE_BINS = 1001
+        START_ANGLE_DEG = 25.0
+        END_ANGLE_DEG = -25.0
+        # --- PLOT 1: Measurement Domain (y vs y_hat) ---
+
+        # Select the first sample (index 0) from the last batch
+        y_sample = y_batch[0]       # Shape [2, 8]
+        y_hat_sample = y_hat_batch[0] # Shape [2, 8]
+
+        # Move to CPU, get the real part (index 0), and convert to numpy
+        y_real = y_sample[0].cpu().numpy()
+        y_hat_real = y_hat_sample[0].cpu().numpy()
+
+        # Plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(y_real, 'r', label='Ground Truth (y_batch)[0, real]')
+        plt.plot(y_hat_real, 'b--', label='Network Output (y_hat_batch)[0, real]')
+        plt.title(f'Debug Plot - Last Batch (Epoch {NUM_EPOCHS}) - Measurement Domain')
+        plt.xlabel('Virtual Antenna Index')
+        plt.ylabel('Amplitude (Real Part)')
+        plt.legend()
+        plt.grid(True)
+
+        debug_plot_path_y = 'train_debug_plot_y.png'
+        plt.savefig(debug_plot_path_y)
+        print(f"Measurement debug plot saved to {debug_plot_path_y}")
+        plt.close() # Close the figure to start the next one
+
+        # --- PLOT 2: Image Domain (x_hat) ---
+
+        # Select the corresponding x_hat sample (index 0)
+        x_hat_sample = x_hat_batch[0] # Shape [2, 1001]
+
+        # Get real part and convert to numpy
+        x_hat_real = x_hat_sample[0].cpu().numpy()
+
+        # Create the angle axis
+        theta = np.linspace(START_ANGLE_DEG, END_ANGLE_DEG, NUM_ANGLE_BINS)
+
+        # Plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(theta, x_hat_real, 'b', label='Network Output (x_hat_batch)[0, real]')
+        plt.title(f'Debug Plot - Last Batch (Epoch {NUM_EPOCHS}) - Image Domain')
+        plt.xlabel('Angle (degree)')
+        plt.ylabel('Amplitude (Real Part)')
+        plt.legend()
+        plt.grid(True)
+
+        debug_plot_path_x = 'train_debug_plot_x.png'
+        plt.savefig(debug_plot_path_x)
+        print(f"Image debug plot saved to {debug_plot_path_x}")
+        plt.close()
+
+    # Debug code - end
 
     # -----------------------------------------------------------------
     # 6. Save the Trained Model
