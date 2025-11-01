@@ -180,3 +180,12 @@ def complex_inner_product(a, b):
     
     # Return as a [batch, 2] complex scalar
     return torch.stack((sum_r, sum_i), dim=1)
+
+def tensor_to_complex_np(tensor):
+    """Converts a [batch, 2, ...] tensor to a complex numpy array."""
+    if tensor.is_cuda:
+        tensor = tensor.cpu()
+    data = tensor.numpy()
+    # Squeeze out the batch dim if it's 1, then combine channels
+    data_squeezed = data.squeeze(axis=0)
+    return data_squeezed[0] + 1j * data_squeezed[1]

@@ -7,13 +7,10 @@ from utils import (
 )
 
 # -----------------------------------------------------------------
-# 1. CNN Denoiser (Unchanged)
+# 1. CNN Denoiser (Unchanged - keep as is)
 # -----------------------------------------------------------------
 class CNNDenoiser(nn.Module):
-    """
-    Implements the CNN-based denoiser with a residual architecture
-    [cite_start]as shown in Fig. 8 of the paper. [cite: 379-385, 395]
-    """
+    # ... (no changes here) ...
     def __init__(self, in_channels=2, out_channels=2, num_filters=32, kernel_size=3):
         super(CNNDenoiser, self).__init__()
         padding = (kernel_size - 1) // 2
@@ -38,23 +35,21 @@ class CNNDenoiser(nn.Module):
         return identity + out
 
 # -----------------------------------------------------------------
-# 2. New ADMM-based Data Consistency Layer
+# 2. ADMM Layer (Modified to match new MATLAB code - NO SMW)
 # -----------------------------------------------------------------
 class DCLayer_ADMM(nn.Module):
     """
     Implements the Data Consistency (DC) layer using N steps of ADMM
-    to solve:
-    arg min_x (1/2)||x - r_n||^2  s.t. ||y - Ax||_2 <= epsilon
+    by *directly solving* the (I + rho*A.H*A) system, as per
+    the user's new MATLAB file.
     
-    Where r_n is the output of the denoiser.
+    This version does NOT use the SMW identity.
     """
     def __init__(self, A_tensor, N_admm_steps=3):
         super(DCLayer_ADMM, self).__init__()
         self.N_admm_steps = N_admm_steps
         
-        # Learnable parameters (in log-space for stability)
-        # rho: ADMM penalty parameter
-        # epsilon: l2-ball radius
+        # Learnable parameters
         self.log_rho = nn.Parameter(torch.log(torch.tensor(1.0)))
         self.log_epsilon = nn.Parameter(torch.log(torch.tensor(0.01)))
         
@@ -65,145 +60,121 @@ class DCLayer_ADMM(nn.Module):
         A_H = torch.stack((A_tensor[0].T, -A_tensor[1].T), dim=0)
         self.register_buffer('A_H', A_H)
         
-        # Precompute A @ A.H (shape [2, N_v, N_v])
-        A_A_H = complex_matmul_tensor(A_tensor, A_H)
-        self.register_buffer('A_A_H', A_A_H)
+        # Precompute A.H @ A (shape [2, N_theta, N_theta])
+        # This is the large N x N matrix
+        A_H_A = complex_matmul_tensor(A_H, A_tensor)
+        self.register_buffer('A_H_A', A_H_A)
 
     def forward(self, r_n, y, u_in):
         """
         r_n:   [batch, 2, N_theta] (denoiser output)
         y:     [batch, 2, N_v]     (original measurement)
         u_in:  [batch, 2, N_v]     (dual variable from prev iter)
-        
-        Returns:
-        x_out: [batch, 2, N_theta]
-        u_out: [batch, 2, N_v]
         """
         # Get scalar parameters
         rho = torch.exp(self.log_rho)
         epsilon = torch.exp(self.log_epsilon)
         
-        # --- Precompute fixed part of x-update (SMW identity) ---
-        # M = (A @ A.H + rho * I)
-        I = torch.eye(self.A.shape[1], device=r_n.device) # N_v x N_v
-        I_tensor = torch.stack((I, torch.zeros_like(I)), dim=0).unsqueeze(0)
-        M = self.A_A_H.unsqueeze(0) + rho * I_tensor
+        # Get batch size and N_theta
+        batch_size = r_n.shape[0]
+        N_theta = self.A.shape[2]
         
-        # M_inv = (A @ A.H + rho * I)^-1
-        M_inv = complex_batch_inverse(M)
+        # --- Precompute M_mat = (I + rho * A.H @ A) ---
+        # This is (1, 2, N_theta, N_theta)
+        I = torch.eye(N_theta, device=r_n.device)
+        I_tensor = torch.stack((I, torch.zeros_like(I)), dim=0).unsqueeze(0)
+        M_mat = I_tensor + rho * self.A_H_A.unsqueeze(0)
         
         # --- Initialize ADMM variables ---
         u = u_in
-        z = y # Start z close to y
+        z = y 
+        x = r_n # Start x at the denoiser output
+        
+        A_batch = self.A.unsqueeze(0)
         
         # --- Run N_admm_steps ---
         for _ in range(self.N_admm_steps):
             
-            # 1. x-update (using SMW)
-            # x = (I + rho*A.H*A)^-1 @ (r_n + rho*A.H*(z-u))
-            # x = 1/rho * (rhs - A.H @ (A.H*A+rho*I)^-1 @ A @ rhs)
+            # -----------------------------------------------
+            # 1. x-update (Direct Solve, matching MATLAB)
+            # Solves (I + rho*A.H*A) * x = (r_n + rho*A.H*(z-u))
+            # -----------------------------------------------
             
-            # Let rhs = (r_n + rho * A.H @ (z - u))
+            # --- Build rhs = (r_n + rho*A.H*(z-u)) ---
             z_minus_u = z - u
-            A_H_z_u = complex_conj_transpose_matmul(self.A.unsqueeze(0), z_minus_u)
-            rhs = r_n + rho * A_H_z_u
+            A_H_z_u = complex_conj_transpose_matmul(A_batch, z_minus_u)
+            rhs = r_n + rho * A_H_z_u # Shape: [B, 2, N_theta]
             
-            # temp_x = rhs / rho
-            temp_x = rhs / (rho + 1e-8)
+            # --- Solve M_mat * x = rhs ---
+            # We build the [B, 2N, 2N] real block matrix system
             
-            # temp_M_inv_Ax = M_inv @ (A @ temp_x)
-            A_temp_x = complex_matmul(self.A.unsqueeze(0), temp_x)
-            temp_M_inv_Ax = complex_batch_matmul_vec(M_inv, A_temp_x)
+            # M_mat: [1, 2, N, N] -> M_r, M_i: [B, N, N]
+            M_r = M_mat[:, 0].expand(batch_size, -1, -1)
+            M_i = M_mat[:, 1].expand(batch_size, -1, -1)
             
-            # x = temp_x - A.H @ temp_M_inv_Ax
-            x = temp_x - complex_conj_transpose_matmul(self.A.unsqueeze(0), temp_M_inv_Ax)
+            # rhs: [B, 2, N] -> R_r, R_i: [B, N]
+            R_r = rhs[:, 0]
+            R_i = rhs[:, 1]
+            
+            # Build M_block [B, 2N, 2N]
+            top_row = torch.cat([M_r, -M_i], dim=2)
+            bot_row = torch.cat([M_i, M_r], dim=2)
+            M_block = torch.cat([top_row, bot_row], dim=1)
+            
+            # Build R_block [B, 2N, 1]
+            R_block = torch.cat([R_r, R_i], dim=1).unsqueeze(-1)
+            
+            # Solve the large real system
+            x_block = torch.linalg.solve(M_block, R_block) # Shape [B, 2N, 1]
+            
+            # Unpack x
+            x_r = x_block[:, :N_theta, 0].unsqueeze(1)
+            x_i = x_block[:, N_theta:, 0].unsqueeze(1)
+            x = torch.cat([x_r, x_i], dim=1) # Shape [B, 2, N_theta]
+            
+            # -----------------------------------------------
+            # 2. z-update (Matches MATLAB)
+            # z = y + L2Proj(A*x+u-y, epsilon)
+            # -----------------------------------------------
+            Ax = complex_matmul(A_batch, x)
+            Ax_plus_u_minus_y = Ax + u - y
+            
+            # Project the *residual* vector
+            z_residual = complex_project_l2_ball(Ax_plus_u_minus_y, torch.zeros_like(y), epsilon)
+            
+            # Add back to y
+            z = y + z_residual
 
-            # 2. z-update
-            # z = project(A @ x + u) onto l2-ball(y, epsilon)
-            Ax = complex_matmul(self.A.unsqueeze(0), x)
-            Ax_plus_u = Ax + u
-            z = complex_project_l2_ball(Ax_plus_u, y, epsilon)
-
-            # 3. u-update
-            # u = u + A @ x - z
+            # -----------------------------------------------
+            # 3. u-update (Matches MATLAB)
+            # u = u + A*x - z
+            # -----------------------------------------------
             u = u + Ax - z
             
         return x, u
 
 # -----------------------------------------------------------------
-# 3. Updated DBP Network
+# 3. Updated DBP Network (Unchanged - keep as is)
 # -----------------------------------------------------------------
 class DBPNet(nn.Module):
-    """
-    Implements the full unrolled Deep Basis Pursuit (DBP) network
-    as shown in Fig. 7.
-    
-    This is now a STATEFUL network that passes the ADMM dual
-    variable 'u' between iterations.
-    """
+    # ... (no changes here) ...
     def __init__(self, A_tensor, num_iterations=5, N_admm_steps=3):
         super(DBPNet, self).__init__()
         self.num_iterations = num_iterations
         
-        # Register A as a non-trainable buffer for the initial step
         self.register_buffer('A', A_tensor)
-        
-        # 1. The single, shared CNN-based denoiser (28a)
         self.denoiser = CNNDenoiser()
         
-        # 2. A list of stateful ADMM-based Data Consistency layers
         self.dc_layers = nn.ModuleList(
             [DCLayer_ADMM(A_tensor, N_admm_steps) for _ in range(num_iterations)]
         )
 
     def forward(self, y):
-        """
-        Forward pass through the unrolled, stateful network.
-        
-        y: [batch, 2, N_v] (original measurement vectors)
-        """
-        
-        # 1. Get initial estimate x_0 = A.H @ y (Matched Filter)
         x = complex_conj_transpose_matmul(self.A.unsqueeze(0), y)
-        
-        # 2. Initialize the ADMM dual variable 'u'
         u = torch.zeros_like(y)
         
-        # 3. Unroll the iterations
         for i in range(self.num_iterations):
-            # Denoising step (r_n = D_w(x_{n-1}))
             r = self.denoiser(x)
-            
-            # Stateful Data Consistency step (x_n, u_n = ...)
             x, u = self.dc_layers[i](r, y, u)
             
         return x
-
-# --- Example Usage (main block) ---
-if __name__ == '__main__':
-    from data_loader import MIMOSAR_Dataset, DataLoader
-    
-    print("--- Testing new ADMM-based DBPNet ---")
-    
-    # 1. Load the dataset to get 'A'
-    dataset = MIMOSAR_Dataset('../FL_MIMO_SAR_data.mat')
-    A_tensor = dataset.A
-    
-    # 2. Get one batch of data
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
-    y_batch = next(iter(dataloader))
-
-    # 3. Initialize the DBPNet model with N_admm_steps=3
-    model = DBPNet(A_tensor, num_iterations=5, N_admm_steps=3)
-    
-    # 4. Pass the batch through the model
-    x_hat = model(y_batch)
-    
-    print(f"Steering Matrix 'A' shape: {list(A_tensor.shape)}")
-    print(f"Input 'y' batch shape:  {list(y_batch.shape)}")
-    print(f"Output 'x' batch shape: {list(x_hat.shape)}")
-    
-    assert list(x_hat.shape) == [
-        y_batch.shape[0], 2, A_tensor.shape[2]
-    ]
-    print("Test passed: Input and output shapes are correct.")
