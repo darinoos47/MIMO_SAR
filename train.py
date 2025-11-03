@@ -18,7 +18,7 @@ MAT_FILE = 'FL_MIMO_SAR_data.mat'
 MODEL_SAVE_PATH = 'dbp_model.pth'
 
 # Training Hyperparameters
-NUM_EPOCHS = 400
+NUM_EPOCHS = 4000
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-4
 

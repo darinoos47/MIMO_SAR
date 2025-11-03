@@ -37,7 +37,7 @@ class CNNDenoiser(nn.Module):
 # -----------------------------------------------------------------
 # 2. ADMM Layer (Modified to match new MATLAB code - NO SMW)
 # -----------------------------------------------------------------
-class DCLayer_ADMM_temp(nn.Module):
+class DCLayer_ADMM(nn.Module):
     """
     Implements the Data Consistency (DC) layer using N steps of ADMM
     by *directly solving* the (I + rho*A.H*A) system, as per
@@ -178,8 +178,7 @@ class DCLayer_ADMM_temp(nn.Module):
 # -----------------------------------------------------------------
 # 2. ADMM Layer (Modified to match new MATLAB code - NO SMW)
 # -----------------------------------------------------------------
-#class DCLayer_ADMM_no_smw(nn.Module):
-class DCLayer_ADMM(nn.Module):
+class DCLayer_ADMM_no_smw(nn.Module):
     """
     Implements the Data Consistency (DC) layer using N steps of ADMM
     by *directly solving* the (I + rho*A.H*A) system, as per
