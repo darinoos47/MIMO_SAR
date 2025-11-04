@@ -18,13 +18,13 @@ MAT_FILE = 'FL_MIMO_SAR_data.mat'
 MODEL_SAVE_PATH = 'dbp_model.pth'
 
 # Training Hyperparameters
-NUM_EPOCHS = 4000
+NUM_EPOCHS = 500
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-4
 
 # Model Hyperparameters
-NUM_UNROLLS = 5      # N1 in the paper: total unrolled iterations
-NUM_ADMM_STEPS = 3   # N2 in the paper: internal ADMM steps
+NUM_UNROLLS = 1      # N1 in the paper: total unrolled iterations
+NUM_ADMM_STEPS = 1   # N2 in the paper: internal ADMM steps
 
 # -----------------------------------------------------------------
 # 2. Setup
@@ -127,15 +127,11 @@ def main():
     # Debug code - start
     print("Generating debug plots of the last training batch...")
     with torch.no_grad():
-        # <<< NEW: Plotting Parameters (from MATLAB script) >>>
-        NUM_ANGLE_BINS = 1001
-        START_ANGLE_DEG = 25.0
-        END_ANGLE_DEG = -25.0
         # --- PLOT 1: Measurement Domain (y vs y_hat) ---
 
         # Select the first sample (index 0) from the last batch
-        y_sample = y_batch[0]       # Shape [2, 8]
-        y_hat_sample = y_hat_batch[0] # Shape [2, 8]
+        y_sample = y_batch[0]       # Shape [2, N_v]
+        y_hat_sample = y_hat_batch[0] # Shape [2, N_v]
 
         # Move to CPU, get the real part (index 0), and convert to numpy
         y_real = y_sample[0].cpu().numpy()
@@ -159,11 +155,16 @@ def main():
         # --- PLOT 2: Image Domain (x_hat) ---
 
         # Select the corresponding x_hat sample (index 0)
-        x_hat_sample = x_hat_batch[0] # Shape [2, 1001]
+        x_hat_sample = x_hat_batch[0] # Shape [2, N_theta]
 
         # Get real part and convert to numpy
         x_hat_real = x_hat_sample[0].cpu().numpy()
 
+        # *** FIX: Get NUM_ANGLE_BINS from actual data instead of hardcoding ***
+        NUM_ANGLE_BINS = x_hat_real.shape[0]  # Dynamically get from data
+        START_ANGLE_DEG = 25.0
+        END_ANGLE_DEG = -25.0
+        
         # Create the angle axis
         theta = np.linspace(START_ANGLE_DEG, END_ANGLE_DEG, NUM_ANGLE_BINS)
 

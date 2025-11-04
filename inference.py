@@ -30,7 +30,7 @@ SAMPLING_RATE = 10e6
 PULSE_DURATION = 200e-6
 CHIRP_RATE = BANDWIDTH / PULSE_DURATION
 NUM_SAMPLES = int(round(PULSE_DURATION * SAMPLING_RATE)) # 2000
-NUM_ANGLE_BINS = 1001
+# NOTE: NUM_ANGLE_BINS will be determined from actual data (A matrix shape)
 START_ANGLE_DEG = 25.0
 END_ANGLE_DEG = -25.0
 
@@ -106,6 +106,11 @@ def main():
     # A: [N_v, N_theta]
     A_complex = data['A'].astype(np.complex64)
     A_tensor = to_tensor(A_complex).to(device)
+    
+    # Get NUM_ANGLE_BINS from the steering matrix shape
+    # A_tensor shape: [2, N_v, N_theta]
+    NUM_ANGLE_BINS = A_tensor.shape[2]
+    print(f"Number of angle bins from data: {NUM_ANGLE_BINS}")
     
     # y: [N_r, N_v, N_l] -> transpose to [N_l, N_r, N_v]
     y_measurements = np.transpose(data['received_signals_fft'], (2, 0, 1)).astype(np.complex64)
