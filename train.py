@@ -18,12 +18,12 @@ MAT_FILE = 'FL_MIMO_SAR_data.mat'
 MODEL_SAVE_PATH = 'dbp_model.pth'
 
 # Training Hyperparameters
-NUM_EPOCHS = 500
+NUM_EPOCHS = 1000
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-4
 
 # Model Hyperparameters
-NUM_UNROLLS = 1      # N1 in the paper: total unrolled iterations
+NUM_UNROLLS = 1     # N1 in the paper: total unrolled iterations
 NUM_ADMM_STEPS = 1   # N2 in the paper: internal ADMM steps
 
 # -----------------------------------------------------------------

@@ -48,12 +48,12 @@ class MIMOSAR_Dataset(Dataset):
     """
     Custom PyTorch Dataset for loading the FL-MIMO-SAR data.
     
-    FOR FULL UNSUPERVISED TRAINING
+    Supports both supervised and unsupervised training modes.
     
     Each item is a single measurement vector 'y' from one range bin 
-    at one aperture step.
+    at one aperture step. Optionally returns ground truth 'x' if available.
     """
-    def __init__(self, mat_file_path):
+    def __init__(self, mat_file_path, return_ground_truth=False):
         print(f"Loading data from {mat_file_path}...")
         print(f"mat_file_path is: {mat_file_path}") # Added for clarity
         data = load_mat_file(mat_file_path)
@@ -82,11 +82,47 @@ class MIMOSAR_Dataset(Dataset):
         self.A = to_tensor(self.A_complex) # Shape [2, 8, 1001]
         self.num_angle_bins = self.A.shape[2]
         
+        # 4. Load Ground Truth 'x' if requested and available
+        self.return_ground_truth = return_ground_truth
+        self.x_data = None
+        self.has_ground_truth = False
+        
+        if return_ground_truth:
+            if 'x' in data:
+                x_complex = data['x'].astype(np.complex64)
+                print(f"  Ground truth 'x' loaded with shape: {x_complex.shape}")
+                
+                # Handle different possible shapes
+                if x_complex.ndim == 1:
+                    # Single sample: [N_theta]
+                    # Replicate for all samples if needed
+                    if self.num_samples == 1:
+                        self.x_data = x_complex.reshape(1, -1)
+                    else:
+                        print(f"  WARNING: Single ground truth for {self.num_samples} samples - replicating")
+                        self.x_data = np.tile(x_complex, (self.num_samples, 1))
+                elif x_complex.ndim == 2:
+                    # Multiple samples: [N_samples, N_theta]
+                    # Check if shapes match
+                    if x_complex.shape[0] == self.num_samples:
+                        self.x_data = x_complex
+                    else:
+                        print(f"  WARNING: Ground truth samples ({x_complex.shape[0]}) != measurement samples ({self.num_samples})")
+                        # Use as many as we have
+                        self.x_data = x_complex[:self.num_samples]
+                
+                self.has_ground_truth = True
+                print(f"  Stored ground truth 'x' with shape: {self.x_data.shape}")
+            else:
+                print(f"  WARNING: Ground truth requested but 'x' not found in data file!")
+                print(f"  Will use unsupervised training mode.")
+        
         print(f"Data loaded successfully.")
         print(f"  Total training samples: {self.num_samples}")
         print(f"  Virtual antennas (N_v): {self.num_virtual_ant}")
         print(f"  Angle bins (N_theta): {self.num_angle_bins}")
         print(f"  Steering matrix 'A' shape: {list(self.A.shape)}")
+        print(f"  Ground truth available: {self.has_ground_truth}")
 
     def __len__(self):
         return self.num_samples
@@ -98,4 +134,10 @@ class MIMOSAR_Dataset(Dataset):
         # Convert to 2-channel tensor [2, N_v]
         y_tensor = to_tensor(y_complex)
         
-        return y_tensor
+        # Optionally return ground truth x
+        if self.return_ground_truth and self.has_ground_truth:
+            x_complex = self.x_data[idx] # Shape [N_theta]
+            x_tensor = to_tensor(x_complex) # Shape [2, N_theta]
+            return y_tensor, x_tensor
+        else:
+            return y_tensor

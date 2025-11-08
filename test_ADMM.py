@@ -6,7 +6,7 @@ import h5py
 
 from models import DCLayer_ADMM
 from data_loader import to_tensor
-from utils import complex_matmul, tensor_to_complex_np
+from utils import complex_matmul, tensor_to_complex_np, complex_conj_transpose_matmul
 
 # -----------------------------------------------------------------
 # 1. Configuration (from your MATLAB script)
@@ -16,8 +16,8 @@ PLOT_SAVE_PATH_X = 'admm_test_plot_x.png'
 PLOT_SAVE_PATH_Y = 'admm_test_plot_y.png'
 
 # Parameters from your MATLAB script
-RHO_VALUE = 1e-5
-EPSILON_VALUE = 1e12
+RHO_VALUE = 1e3
+EPSILON_VALUE = 1e-3
 NUM_ITER = 1 # We will set the layer's N_admm_steps to 1
 
 def load_mat_file(filepath):
@@ -56,6 +56,7 @@ def main():
     
     # Ground truth reflectivity 'x' (this will be our 'r')
     x_gt_np = data['x'].flatten().astype(np.complex64)
+    print(f"x_gt_np.shape is: {x_gt_np.shape}")
     
     # Ground truth measurement 'y'
     y_gt_np = data['y'].flatten().astype(np.complex64)
@@ -63,7 +64,7 @@ def main():
     # Normalized steering matrix 'A'
     A_np = data['A'].astype(np.complex64)
     A_tensor = to_tensor(A_np).to(device)
-    A_batch_tensor = A_tensor.unsqueeze(0)
+    A_batch_tensor = A_tensor.unsqueeze(0) # Shape [1, 2, 8, 1001]
 
     # -----------------------------------------------------------------
     # 2. Instantiate and Configure the ADMM Layer
@@ -90,9 +91,13 @@ def main():
     # -----------------------------------------------------------------
     # r = x (the ground truth)
     r_n_tensor = to_tensor(x_gt_np).unsqueeze(0).to(device) # Shape [1, 2, 1001]
+    print(f"r_n_tensor shape is: {r_n_tensor.shape}")
     
     # y = y (the measurement)
     y_tensor = to_tensor(y_gt_np).unsqueeze(0).to(device) # Shape [1, 2, 8]
+    
+    # r = Ah*y (matched filter result as initial guess)
+    r_n_tensor = complex_conj_transpose_matmul(A_batch_tensor, y_tensor)
     
     # u0 = zeros
     u_in_tensor = torch.zeros_like(y_tensor) # Shape [1, 2, 8]
@@ -119,7 +124,8 @@ def main():
     # --- Figure 1: Plot x ---
     plt.figure(figsize=(12, 7))
     plt.hold_on = True # Keep this for compatibility, though not needed in modern matplotlib
-    plt.plot(np.abs(x_gt_np), linewidth=1.5, label='x prior (r = x_true)')
+    # plt.plot(np.abs(x_gt_np), linewidth=1.5, label='x prior (r = x_true)')
+    plt.plot(np.abs(np.abs(r_n_tensor[0,0,:].cpu() + 1j *r_n_tensor[0, 1, :].cpu())), linewidth=1.5, label='x prior (r = x_true)')
     plt.plot(np.abs(x_estimated_np), 'o', linewidth=1.5, markersize=4, label='x estimated ADMM')
     plt.legend(["x prior (r = x_true)", "x estimated ADMM"])
     plt.grid(True)
