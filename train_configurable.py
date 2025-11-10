@@ -18,16 +18,16 @@ MAT_FILE = 'FL_MIMO_SAR_data.mat'
 MODEL_SAVE_PATH = 'dbp_model.pth'
 
 # Training Hyperparameters
-NUM_EPOCHS = 250
+NUM_EPOCHS = 500
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-4
 
 # Model Hyperparameters
-NUM_UNROLLS = 1      # N1 in the paper: total unrolled iterations
-NUM_ADMM_STEPS = 1   # N2 in the paper: internal ADMM steps
+NUM_UNROLLS = 5      # N1 in the paper: total unrolled iterations
+NUM_ADMM_STEPS = 2   # N2 in the paper: internal ADMM steps
 
 # *** NEW: Training Mode Configuration ***
-TRAINING_MODE = 'hybrid'  # Options: 'supervised', 'unsupervised', 'hybrid'
+TRAINING_MODE = 'supervised'  # Options: 'supervised', 'unsupervised', 'hybrid'
 SUPERVISED_WEIGHT = 1.0   # Weight for supervised loss (image domain)
 UNSUPERVISED_WEIGHT = 1.0 # Weight for unsupervised loss (measurement domain)
 
@@ -283,7 +283,7 @@ def main():
             x_gt_real = x_gt_sample[0].cpu().numpy()
             plt.plot(theta, x_gt_real, 'r', label='Ground Truth (x_gt)[0, real]', linewidth=2)
         
-        plt.plot(theta, x_hat_real, 'b--', label='Network Output (x_hat_batch)[0, real]', linewidth=2)
+        plt.plot(theta, x_hat_real / np.max(x_hat_real), 'b--', label='Network Output (x_hat_batch)[0, real]', linewidth=2)
         plt.title(f'Debug Plot - Last Batch (Epoch {NUM_EPOCHS}) - Image Domain')
         plt.xlabel('Angle (degree)')
         plt.ylabel('Amplitude (Real Part)')
