@@ -10,6 +10,10 @@ import time
 from data_loader import MIMOSAR_Dataset
 from models import DBPNet
 from utils import complex_matmul
+from visualization_utils import (plot_unrolled_iterations, 
+                                 plot_iteration_comparison,
+                                 plot_mse_progression,
+                                 plot_measurement_domain_progression)
 
 # -----------------------------------------------------------------
 # 1. Configuration
@@ -31,6 +35,11 @@ TRAINING_MODE = 'supervised'  # Options: 'supervised', 'unsupervised', 'hybrid'
 SUPERVISED_WEIGHT = 1.0   # Weight for supervised loss (image domain)
 UNSUPERVISED_WEIGHT = 1.0 # Weight for unsupervised loss (measurement domain)
 
+# *** NEW: Two-Stage Training Configuration ***
+TRAINING_STRATEGY = 'two_stage'  # Options: 'end_to_end', 'two_stage'
+PRETRAINED_DENOISER_PATH = 'denoiser_pretrained.pth'  # Path to pre-trained denoiser (for two_stage)
+FREEZE_DENOISER = True  # True: freeze denoiser (only train ADMM), False: fine-tune denoiser too
+
 # Note: If ground truth 'x' is not available, will automatically fall back to unsupervised mode
 
 # -----------------------------------------------------------------
@@ -40,6 +49,7 @@ def main():
     # Set device (GPU if available, otherwise CPU)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"--- Using device: {device} ---")
+    print(f"--- Training Strategy: {TRAINING_STRATEGY.upper()} ---")
     print(f"--- Training Mode: {TRAINING_MODE.upper()} ---")
 
     # -----------------------------------------------------------------
@@ -85,15 +95,40 @@ def main():
         num_iterations=NUM_UNROLLS, 
         N_admm_steps=NUM_ADMM_STEPS
     ).to(device)
+    
+    # Handle two-stage training: load pre-trained denoiser
+    if TRAINING_STRATEGY == 'two_stage':
+        print(f"\n*** TWO-STAGE TRAINING MODE ***")
+        if os.path.exists(PRETRAINED_DENOISER_PATH):
+            model.load_pretrained_denoiser(PRETRAINED_DENOISER_PATH)
+            
+            if FREEZE_DENOISER:
+                model.freeze_denoiser()
+                print(f"Training mode: ADMM parameters only (denoiser frozen)")
+            else:
+                print(f"Training mode: Fine-tuning denoiser + training ADMM parameters")
+        else:
+            print(f"\n*** ERROR: Pre-trained denoiser not found at {PRETRAINED_DENOISER_PATH}!")
+            print(f"*** Please train the denoiser first using: python train_denoiser_only.py")
+            print(f"*** Falling back to END-TO-END training ***\n")
+    else:
+        print(f"\n*** END-TO-END TRAINING MODE ***")
+        print(f"Training all parameters from scratch (denoiser + ADMM)")
 
     # Loss functions
     criterion_image = nn.MSELoss()      # For supervised loss (image domain)
     criterion_measurement = nn.MSELoss() # For unsupervised loss (measurement domain)
     
     # Optimizer (Adam)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    # Use get_trainable_params() to only optimize unfrozen parameters
+    trainable_params = model.get_trainable_params()
+    optimizer = optim.Adam(trainable_params, lr=LEARNING_RATE)
     
-    print(f"Model Parameters:\n  Num Unrolls (N1): {NUM_UNROLLS}\n  Num ADMM Steps (N2): {NUM_ADMM_STEPS}")
+    print(f"\nModel Parameters:")
+    print(f"  Num Unrolls (N1): {NUM_UNROLLS}")
+    print(f"  Num ADMM Steps (N2): {NUM_ADMM_STEPS}")
+    print(f"  Total parameters: {sum(p.numel() for p in model.parameters())}")
+    print(f"  Trainable parameters: {sum(p.numel() for p in trainable_params)}")
     print(f"Training Configuration:")
     print(f"  Mode: {actual_training_mode}")
     if actual_training_mode == 'hybrid':
@@ -298,7 +333,39 @@ def main():
     # Debug code - end
 
     # -----------------------------------------------------------------
-    # 8. Save the Trained Model
+    # 8. Visualize Progressive Refinement Through Iterations
+    # -----------------------------------------------------------------
+    print("Generating progressive refinement visualizations...")
+    with torch.no_grad():
+        # Run forward pass with intermediate outputs
+        intermediates = model(y_batch, return_intermediates=True)
+        
+        # Prepare ground truth if available
+        x_gt_for_viz = x_gt_batch if has_ground_truth else None
+        
+        # Generate all visualization plots
+        print("  Creating detailed iteration-by-iteration plot...")
+        plot_unrolled_iterations(intermediates, x_gt=x_gt_for_viz, sample_idx=0,
+                                save_path='train_unrolled_iterations.png')
+        
+        print("  Creating iteration comparison plot...")
+        plot_iteration_comparison(intermediates, x_gt=x_gt_for_viz, sample_idx=0,
+                                 save_path='train_iteration_comparison.png')
+        
+        if has_ground_truth:
+            print("  Creating MSE progression plot...")
+            plot_mse_progression(intermediates, x_gt=x_gt_for_viz, sample_idx=0,
+                               save_path='train_mse_progression.png')
+        
+        print("  Creating measurement domain progression plot...")
+        plot_measurement_domain_progression(intermediates, y_gt=y_batch, A_tensor=A_tensor, 
+                                          sample_idx=0, 
+                                          save_path='train_measurement_domain_progression.png')
+    
+    print("Progressive refinement visualizations complete!")
+
+    # -----------------------------------------------------------------
+    # 9. Save the Trained Model
     # -----------------------------------------------------------------
     print("--- Training Complete ---")
     torch.save(model.state_dict(), MODEL_SAVE_PATH)

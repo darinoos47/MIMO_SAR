@@ -10,6 +10,9 @@ import time
 from data_loader import MIMOSAR_Dataset
 from models import DBPNet
 from utils import complex_matmul
+from visualization_utils import (plot_unrolled_iterations, 
+                                 plot_iteration_comparison,
+                                 plot_measurement_domain_progression)
 
 # -----------------------------------------------------------------
 # 1. Configuration
@@ -185,7 +188,31 @@ def main():
     # Debug code - end
 
     # -----------------------------------------------------------------
-    # 6. Save the Trained Model
+    # 6. Visualize Progressive Refinement Through Iterations
+    # -----------------------------------------------------------------
+    print("Generating progressive refinement visualizations...")
+    with torch.no_grad():
+        # Run forward pass with intermediate outputs
+        intermediates = model(y_batch, return_intermediates=True)
+        
+        # Generate visualization plots (no ground truth in unsupervised mode)
+        print("  Creating detailed iteration-by-iteration plot...")
+        plot_unrolled_iterations(intermediates, x_gt=None, sample_idx=0,
+                                save_path='train_unrolled_iterations.png')
+        
+        print("  Creating iteration comparison plot...")
+        plot_iteration_comparison(intermediates, x_gt=None, sample_idx=0,
+                                 save_path='train_iteration_comparison.png')
+        
+        print("  Creating measurement domain progression plot...")
+        plot_measurement_domain_progression(intermediates, y_gt=y_batch, A_tensor=A_tensor, 
+                                          sample_idx=0,
+                                          save_path='train_measurement_domain_progression.png')
+    
+    print("Progressive refinement visualizations complete!")
+
+    # -----------------------------------------------------------------
+    # 7. Save the Trained Model
     # -----------------------------------------------------------------
     print("--- Training Complete ---")
     torch.save(model.state_dict(), MODEL_SAVE_PATH)

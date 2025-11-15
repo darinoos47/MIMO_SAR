@@ -309,13 +309,77 @@ class DBPNet(nn.Module):
         self.dc_layers = nn.ModuleList(
             [DCLayer_ADMM(A_tensor, N_admm_steps) for _ in range(num_iterations)]
         )
+    
+    def load_pretrained_denoiser(self, denoiser_path):
+        """
+        Load pre-trained denoiser weights.
+        
+        Args:
+            denoiser_path: Path to saved denoiser state dict
+        """
+        print(f"Loading pre-trained denoiser from {denoiser_path}")
+        denoiser_state = torch.load(denoiser_path)
+        self.denoiser.load_state_dict(denoiser_state)
+        print("Pre-trained denoiser loaded successfully!")
+    
+    def freeze_denoiser(self):
+        """Freeze denoiser parameters (no gradient updates)."""
+        for param in self.denoiser.parameters():
+            param.requires_grad = False
+        print("Denoiser parameters frozen (no gradient updates)")
+    
+    def unfreeze_denoiser(self):
+        """Unfreeze denoiser parameters (allow gradient updates)."""
+        for param in self.denoiser.parameters():
+            param.requires_grad = True
+        print("Denoiser parameters unfrozen (gradient updates enabled)")
+    
+    def get_trainable_params(self):
+        """Return only trainable parameters (useful when denoiser is frozen)."""
+        return [p for p in self.parameters() if p.requires_grad]
 
-    def forward(self, y):
+    def forward(self, y, return_intermediates=False):
+        """
+        Forward pass through the network.
+        
+        Args:
+            y: Measurements [batch, 2, N_v]
+            return_intermediates: If True, returns intermediate outputs from each iteration
+            
+        Returns:
+            If return_intermediates=False:
+                x: Final reconstructed reflectivity [batch, 2, N_theta]
+            If return_intermediates=True:
+                Dictionary with:
+                    'x_final': Final output
+                    'x_init': Initial estimate (A^H @ y)
+                    'x_after_denoiser': List of outputs after denoiser at each iteration
+                    'x_after_admm': List of outputs after ADMM at each iteration
+        """
         x = complex_conj_transpose_matmul(self.A.unsqueeze(0), y)
         u = torch.zeros_like(y)
         
+        if return_intermediates:
+            intermediates = {
+                'x_init': x.detach().clone(),
+                'x_after_denoiser': [],
+                'x_after_admm': []
+            }
+        
         for i in range(self.num_iterations):
             r = self.denoiser(x)
+            # r = x # debug: Bypass denoiser to check ADMM
+            
+            if return_intermediates:
+                intermediates['x_after_denoiser'].append(r.detach().clone())
+            
             x, u = self.dc_layers[i](r, y, u)
             
-        return x
+            if return_intermediates:
+                intermediates['x_after_admm'].append(x.detach().clone())
+            
+        if return_intermediates:
+            intermediates['x_final'] = x
+            return intermediates
+        else:
+            return x

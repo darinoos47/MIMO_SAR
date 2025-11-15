@@ -54,6 +54,7 @@ class MIMOSAR_Dataset(Dataset):
     at one aperture step. Optionally returns ground truth 'x' if available.
     """
     def __init__(self, mat_file_path, return_ground_truth=False):
+        return_ground_truth = True
         print(f"Loading data from {mat_file_path}...")
         print(f"mat_file_path is: {mat_file_path}") # Added for clarity
         data = load_mat_file(mat_file_path)
