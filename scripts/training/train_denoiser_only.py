@@ -7,15 +7,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 import time
 
-from data_loader import MIMOSAR_Dataset
-from models import CNNDenoiser
-from utils import complex_matmul, complex_conj_transpose_matmul
+# Add project root to path
+import sys
+import os
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+sys.path.insert(0, project_root)
+
+
+from core.data_loader import MIMOSAR_Dataset
+from core.models import CNNDenoiser
+from core.utils import complex_matmul, complex_conj_transpose_matmul
 
 # -----------------------------------------------------------------
 # 1. Configuration
 # -----------------------------------------------------------------
-MAT_FILE = 'FL_MIMO_SAR_data.mat'
-MODEL_SAVE_PATH = 'denoiser_pretrained.pth'
+MAT_FILE = '../../data/FL_MIMO_SAR_data.mat'
+MODEL_SAVE_PATH = '../../checkpoints/denoiser_pretrained.pth'
 
 # Training Hyperparameters
 NUM_EPOCHS = 500

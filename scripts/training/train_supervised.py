@@ -7,19 +7,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 import time
 
-from data_loader import MIMOSAR_Dataset
-from models import DBPNet
-from utils import complex_matmul
-from visualization_utils import (plot_unrolled_iterations, 
-                                 plot_iteration_comparison,
-                                 plot_measurement_domain_progression)
-from real_prior import enforce_real_prior, measure_imaginary_magnitude
+# Add project root to path
+import sys
+import os
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+sys.path.insert(0, project_root)
+
+
+from core.data_loader import MIMOSAR_Dataset
+from core.models import DBPNet
+from core.utils import complex_matmul
 
 # -----------------------------------------------------------------
 # 1. Configuration
 # -----------------------------------------------------------------
-MAT_FILE = 'FL_MIMO_SAR_data.mat'
-MODEL_SAVE_PATH = 'dbp_model.pth'
+MAT_FILE = '../../data/FL_MIMO_SAR_data.mat'
+MODEL_SAVE_PATH = '../../checkpoints/dbp_model.pth'
 
 # Training Hyperparameters
 NUM_EPOCHS = 1000
@@ -30,11 +33,6 @@ LEARNING_RATE = 1e-4
 NUM_UNROLLS = 1     # N1 in the paper: total unrolled iterations
 NUM_ADMM_STEPS = 1   # N2 in the paper: internal ADMM steps
 
-# Real-Valued Prior Enforcement
-ENFORCE_REAL_PRIOR = True  # True: enforce real-valued outputs, False: allow complex
-REAL_PRIOR_STRATEGY = 'hybrid'  # Options: 'loss_penalty', 'hard_projection', 'hybrid'
-REAL_PRIOR_WEIGHT = 0.1  # Weight for imaginary penalty
-
 # -----------------------------------------------------------------
 # 2. Setup
 # -----------------------------------------------------------------
@@ -42,10 +40,6 @@ def main():
     # Set device (GPU if available, otherwise CPU)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"--- Using device: {device} ---")
-    if ENFORCE_REAL_PRIOR:
-        print(f"--- Real Prior: {REAL_PRIOR_STRATEGY.upper()} (weight={REAL_PRIOR_WEIGHT}) ---")
-    else:
-        print(f"--- Real Prior: DISABLED (allowing complex outputs) ---")
 
     # -----------------------------------------------------------------
     # 3. Load Data
@@ -105,24 +99,15 @@ def main():
             # 1. Get the estimated reflectivity x_hat from the model
             x_hat_batch = model(y_batch)
             
-            # 2. Apply real-valued prior enforcement if enabled
-            real_prior_penalty = torch.tensor(0.0, device=device)
-            if ENFORCE_REAL_PRIOR:
-                x_hat_batch, real_prior_penalty = enforce_real_prior(
-                    x_hat_batch, 
-                    strategy=REAL_PRIOR_STRATEGY,
-                    penalty_weight=REAL_PRIOR_WEIGHT
-                )
-            
-            # 3. Project x_hat back to measurement domain
+            # 2. Project x_hat back to measurement domain
             # y_hat = A * x_hat
             
             # <<< FIX WAS HERE: Use A_batch_tensor (4D) not A_tensor (3D) >>>
             y_hat_batch = complex_matmul(A_batch_tensor, x_hat_batch)
             
-            # 4. Compute the unsupervised loss in the measurement domain
-            # Loss = || y_hat - y ||^2 + real_prior_penalty
-            loss = criterion(y_hat_batch, y_batch) + real_prior_penalty
+            # 3. Compute the unsupervised loss in the measurement domain
+            # Loss = || y_hat - y ||^2
+            loss = criterion(y_hat_batch, y_batch)
             
             # --- Backward Pass and Optimization ---
             # 1. Clear previous gradients
@@ -207,31 +192,7 @@ def main():
     # Debug code - end
 
     # -----------------------------------------------------------------
-    # 6. Visualize Progressive Refinement Through Iterations
-    # -----------------------------------------------------------------
-    print("Generating progressive refinement visualizations...")
-    with torch.no_grad():
-        # Run forward pass with intermediate outputs
-        intermediates = model(y_batch, return_intermediates=True)
-        
-        # Generate visualization plots (no ground truth in unsupervised mode)
-        print("  Creating detailed iteration-by-iteration plot...")
-        plot_unrolled_iterations(intermediates, x_gt=None, sample_idx=0,
-                                save_path='train_unrolled_iterations.png')
-        
-        print("  Creating iteration comparison plot...")
-        plot_iteration_comparison(intermediates, x_gt=None, sample_idx=0,
-                                 save_path='train_iteration_comparison.png')
-        
-        print("  Creating measurement domain progression plot...")
-        plot_measurement_domain_progression(intermediates, y_gt=y_batch, A_tensor=A_tensor, 
-                                          sample_idx=0,
-                                          save_path='train_measurement_domain_progression.png')
-    
-    print("Progressive refinement visualizations complete!")
-
-    # -----------------------------------------------------------------
-    # 7. Save the Trained Model
+    # 6. Save the Trained Model
     # -----------------------------------------------------------------
     print("--- Training Complete ---")
     torch.save(model.state_dict(), MODEL_SAVE_PATH)

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from utils import (
+from .utils import (
     complex_matmul, complex_conj_transpose_matmul,
     complex_matmul_tensor, complex_batch_matmul_vec,
     complex_batch_inverse, complex_project_l2_ball

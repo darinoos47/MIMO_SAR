@@ -7,20 +7,27 @@ import matplotlib.pyplot as plt
 import numpy as np
 import time
 
-from data_loader import MIMOSAR_Dataset
-from models import DBPNet
-from utils import complex_matmul
-from visualization_utils import (plot_unrolled_iterations, 
+# Add project root to path
+import sys
+import os
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+sys.path.insert(0, project_root)
+
+
+from core.data_loader import MIMOSAR_Dataset
+from core.models import DBPNet
+from core.utils import complex_matmul
+from core.visualization_utils import (plot_unrolled_iterations, 
                                  plot_iteration_comparison,
                                  plot_mse_progression,
                                  plot_measurement_domain_progression)
-from real_prior import enforce_real_prior, measure_imaginary_magnitude
+from core.real_prior import enforce_real_prior, measure_imaginary_magnitude
 
 # -----------------------------------------------------------------
 # 1. Configuration
 # -----------------------------------------------------------------
-MAT_FILE = 'FL_MIMO_SAR_data.mat'
-MODEL_SAVE_PATH = 'dbp_model.pth'
+MAT_FILE = '../../data/FL_MIMO_SAR_data.mat'
+MODEL_SAVE_PATH = '../../checkpoints/dbp_model.pth'
 
 # Training Hyperparameters
 NUM_EPOCHS = 500
@@ -38,7 +45,7 @@ UNSUPERVISED_WEIGHT = 1.0 # Weight for unsupervised loss (measurement domain)
 
 # *** NEW: Two-Stage Training Configuration ***
 TRAINING_STRATEGY = 'two_stage'  # Options: 'end_to_end', 'two_stage'
-PRETRAINED_DENOISER_PATH = 'denoiser_curriculum.pth'  # Path to pre-trained denoiser (for two_stage)
+PRETRAINED_DENOISER_PATH = '../../checkpoints/denoiser_curriculum.pth'  # Path to pre-trained denoiser (for two_stage)
 FREEZE_DENOISER = True  # True: freeze denoiser (only train ADMM), False: fine-tune denoiser too
 
 # *** NEW: Real-Valued Prior Enforcement ***

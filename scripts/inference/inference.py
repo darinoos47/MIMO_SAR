@@ -5,14 +5,21 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import RegularGridInterpolator
 import h5py
 
-from models import DBPNet
-from data_loader import to_tensor
+# Add project root to path
+import sys
+import os
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+sys.path.insert(0, project_root)
+
+
+from core.models import DBPNet
+from core.data_loader import to_tensor
 
 # -----------------------------------------------------------------
 # 1. Configuration
 # -----------------------------------------------------------------
-MAT_FILE = 'FL_MIMO_SAR_data.mat'
-MODEL_PATH = 'dbp_model.pth'
+MAT_FILE = '../../data/FL_MIMO_SAR_data.mat'
+MODEL_PATH = '../../checkpoints/dbp_model.pth'
 RESULT_IMAGE_PATH = 'dbp_reconstructed_image.png'
 GT_IMAGE_PATH = 'ground_truth_image.png'
 

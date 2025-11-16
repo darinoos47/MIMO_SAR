@@ -20,12 +20,19 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import matplotlib.pyplot as plt
+
+# Add project root to path
+import sys
+import os
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+sys.path.insert(0, project_root)
+
 from time import time
 
-from models import CNNDenoiser, DCLayer_ADMM
-from data_loader import MIMOSAR_Dataset
-from utils import complex_matmul, complex_conj_transpose_matmul
-from real_prior import enforce_real_prior, measure_imaginary_magnitude
+from core.models import CNNDenoiser, DCLayer_ADMM
+from core.data_loader import MIMOSAR_Dataset
+from core.utils import complex_matmul, complex_conj_transpose_matmul
+from core.real_prior import enforce_real_prior, measure_imaginary_magnitude
 
 # -----------------------------------------------------------------
 # Configuration
@@ -35,7 +42,7 @@ from real_prior import enforce_real_prior, measure_imaginary_magnitude
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Data
-MAT_FILE_PATH = 'FL_MIMO_SAR_data.mat'
+MAT_FILE_PATH = '../../data/FL_MIMO_SAR_data.mat'
 
 # Curriculum Training Configuration
 NUM_CURRICULUM_STAGES = 5  # Train for 3 iteration depths (0, 1, 2)
@@ -56,7 +63,7 @@ REAL_PRIOR_STRATEGY = 'hard_projection'  # Options: 'loss_penalty', 'hard_projec
 REAL_PRIOR_WEIGHT = 0.1  # Weight for imaginary penalty
 
 # Output
-MODEL_SAVE_PATH = 'denoiser_curriculum.pth'
+MODEL_SAVE_PATH = '../../checkpoints/denoiser_curriculum.pth'
 
 # -----------------------------------------------------------------
 # Helper Functions

@@ -4,14 +4,21 @@ import scipy.io
 import matplotlib.pyplot as plt
 import h5py
 
-from models import DCLayer_ADMM
-from data_loader import to_tensor
-from utils import complex_matmul, tensor_to_complex_np, complex_conj_transpose_matmul
+# Add project root to path
+import sys
+import os
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+sys.path.insert(0, project_root)
+
+
+from core.models import DCLayer_ADMM
+from core.data_loader import to_tensor
+from core.utils import complex_matmul, tensor_to_complex_np, complex_conj_transpose_matmul
 
 # -----------------------------------------------------------------
 # 1. Configuration (from your MATLAB script)
 # -----------------------------------------------------------------
-MAT_FILE = 'data_test_ADMM.mat' # Assumes this has A, x, and y
+MAT_FILE = '../../data/data_test_ADMM.mat' # Assumes this has A, x, and y
 PLOT_SAVE_PATH_X = 'admm_test_plot_x.png'
 PLOT_SAVE_PATH_Y = 'admm_test_plot_y.png'
 

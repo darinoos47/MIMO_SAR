@@ -20,37 +20,70 @@ Deep learning-based image reconstruction for FMCW MIMO SAR using unrolled networ
 
 ```
 MIMO_SAR/
-├── data_loader.py                      # Dataset loading with optional ground truth
-├── models.py                           # CNNDenoiser, DCLayer_ADMM, DBPNet
-├── utils.py                            # Complex operations, L2-ball projection
-├── visualization_utils.py              # Plotting functions for analysis
+├── core/                               # Core modules
+│   ├── __init__.py
+│   ├── models.py                      # CNNDenoiser, DCLayer_ADMM, DBPNet
+│   ├── data_loader.py                 # Dataset loading with optional ground truth
+│   ├── utils.py                       # Complex operations, L2-ball projection
+│   ├── visualization_utils.py         # Plotting functions for analysis
+│   └── real_prior.py                  # Real-valued prior enforcement
 │
-├── train.py                            # Original unsupervised training script
-├── train_configurable.py               # Configurable training (supervised/unsupervised/hybrid)
-├── train_denoiser_only.py              # Standalone denoiser training (Stage 1)
-├── train_denoiser_curriculum.py        # Curriculum training for denoiser (addresses domain shift)
+├── scripts/                            # Executable scripts
+│   ├── training/                      # Training scripts
+│   │   ├── train.py                   # Original unsupervised training
+│   │   ├── train_configurable.py      # Configurable training (all modes)
+│   │   ├── train_supervised.py        # Supervised training
+│   │   ├── train_denoiser_only.py     # Standalone denoiser training
+│   │   └── train_denoiser_curriculum.py # Curriculum training
+│   ├── testing/                       # Testing scripts
+│   │   ├── test_ADMM.py
+│   │   ├── test_full_dataset.py
+│   │   └── test_unsupervised_model.py
+│   ├── inference/                     # Inference scripts
+│   │   └── inference.py               # Generate final SAR image
+│   └── analysis/                      # Analysis & comparison
+│       ├── compare_training_modes.py
+│       └── compare_training_strategies.py
 │
-├── test_unsupervised_model.py          # Test model on single sample
-├── test_full_dataset.py                # Evaluate on full dataset
-├── inference.py                        # Generate final SAR image (Cartesian)
+├── data/                               # Data files
+│   ├── FL_MIMO_SAR_data.mat           # Dataset (y, A, x)
+│   ├── data_test_ADMM.mat
+│   └── matlab_generators/             # MATLAB data generation scripts
+│       ├── generate_dataset.m
+│       └── single_sample_generator.m
 │
-├── compare_training_strategies.py      # Compare end-to-end vs. two-stage
+├── checkpoints/                        # Saved models
+│   ├── dbp_model.pth                  # Full network weights
+│   ├── denoiser_pretrained.pth        # Pre-trained denoiser (standard)
+│   └── denoiser_curriculum.pth        # Curriculum-trained denoiser
 │
-├── FL_MIMO_SAR_data.mat                # Dataset (y, A, x)
-├── dbp_model.pth                       # Saved model weights
-├── denoiser_pretrained.pth             # Pre-trained denoiser (standard training)
-├── denoiser_curriculum.pth             # Curriculum-trained denoiser (robust to domain shift)
+├── results/                            # Generated outputs
+│   ├── test_results/                  # Test plots and metrics
+│   ├── training_outputs/              # Training visualizations
+│   └── curriculum_outputs/            # Curriculum training outputs
 │
-└── Documentation/
-    ├── README.md                       # This file
-    ├── QUICK_REFERENCE.md              # Quick reference card
-    ├── SUPERVISED_TRAINING_GUIDE.md    # Supervised training guide
-    ├── TWO_STAGE_TRAINING_GUIDE.md     # Two-stage training guide
-    ├── TWO_STAGE_TRAINING_SUMMARY.md   # Two-stage quick reference
-    ├── CURRICULUM_TRAINING_GUIDE.md    # Curriculum training detailed guide
-    ├── CURRICULUM_TRAINING_QUICK_START.md # Curriculum training quick reference
-    ├── ITERATION_VISUALIZATION_GUIDE.md # Visualization guide
-    └── MEASUREMENT_DOMAIN_VISUALIZATION.md
+├── docs/                               # Documentation
+│   ├── guides/                        # Comprehensive guides
+│   │   ├── QUICK_REFERENCE.md
+│   │   ├── SUPERVISED_TRAINING_GUIDE.md
+│   │   ├── TWO_STAGE_TRAINING_GUIDE.md
+│   │   ├── CURRICULUM_TRAINING_GUIDE.md
+│   │   ├── REAL_PRIOR_GUIDE.md
+│   │   ├── ITERATION_VISUALIZATION_GUIDE.md
+│   │   └── MEASUREMENT_DOMAIN_VISUALIZATION.md
+│   └── summaries/                     # Quick references
+│       ├── QUICK_START_TWO_STAGE.md
+│       ├── SUPERVISED_TRAINING_SUMMARY.md
+│       ├── TWO_STAGE_TRAINING_SUMMARY.md
+│       ├── CURRICULUM_TRAINING_QUICK_START.md
+│       ├── ITERATION_VISUALIZATION_SUMMARY.md
+│       └── ...
+│
+├── tests/                              # Unit tests
+│   └── data_loader_test.py
+│
+├── .gitignore
+└── README.md                           # This file
 ```
 
 ---
@@ -60,7 +93,7 @@ MIMO_SAR/
 ### 1. Basic Unsupervised Training
 
 ```bash
-python train.py
+python scripts/training/train.py
 ```
 
 Trains the network using measurement domain loss (no ground truth required).
@@ -68,11 +101,11 @@ Trains the network using measurement domain loss (no ground truth required).
 ### 2. Configurable Training
 
 ```bash
-# Edit train_configurable.py to set:
+# Edit scripts/training/train_configurable.py to set:
 # TRAINING_MODE = 'supervised'  # or 'unsupervised', 'hybrid'
 # TRAINING_STRATEGY = 'end_to_end'  # or 'two_stage'
 
-python train_configurable.py
+python scripts/training/train_configurable.py
 ```
 
 ### 3. Two-Stage Training
@@ -80,20 +113,20 @@ python train_configurable.py
 **Step 1: Train Denoiser**
 
 ```bash
-# Edit train_denoiser_only.py to set:
+# Edit scripts/training/train_denoiser_only.py to set:
 # DENOISER_TRAINING_MODE = 'unsupervised'  # or 'supervised'
 
-python train_denoiser_only.py
+python scripts/training/train_denoiser_only.py
 ```
 
 **Step 2: Train Full Network**
 
 ```bash
-# Edit train_configurable.py to set:
+# Edit scripts/training/train_configurable.py to set:
 # TRAINING_STRATEGY = 'two_stage'
 # FREEZE_DENOISER = True  # or False for fine-tuning
 
-python train_configurable.py
+python scripts/training/train_configurable.py
 ```
 
 ### 4. Curriculum Training (Advanced)
@@ -106,10 +139,10 @@ Train a denoiser that's robust to domain shift across unrolled iterations:
 # CURRICULUM_TRAINING_MODE = 'unsupervised'  # or 'supervised'
 # CURRICULUM_RETRAINING_STRATEGY = 'from_scratch'  # or 'fine_tune'
 
-python train_denoiser_curriculum.py
+python scripts/training/train_denoiser_curriculum.py
 
 # Then use in two-stage training:
-python train_configurable.py
+python scripts/training/train_configurable.py
 # (with PRETRAINED_DENOISER_PATH = 'denoiser_curriculum.pth')
 ```
 
