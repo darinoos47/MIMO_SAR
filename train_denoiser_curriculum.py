@@ -1,0 +1,549 @@
+"""
+Progressive Curriculum Training for Denoiser
+
+This script implements curriculum learning to train a denoiser that can handle
+inputs from any iteration depth in the unrolled network.
+
+Strategy:
+1. Stage 0: Train on A^H @ y
+2. Stage 1: Generate x_after_ADMM_0, retrain on [A^H@y, x_after_ADMM_0]
+3. Stage k: Generate x_after_ADMM_{k-1}, retrain on accumulated dataset
+4. Continue until target number of iterations
+
+This addresses the domain shift problem where later iterations see different
+input distributions than the matched filter output.
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+import matplotlib.pyplot as plt
+from time import time
+
+from models import CNNDenoiser, DCLayer_ADMM
+from data_loader import MIMOSAR_Dataset
+from utils import complex_matmul, complex_conj_transpose_matmul
+from real_prior import enforce_real_prior, measure_imaginary_magnitude
+
+# -----------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------
+
+# Device
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Data
+MAT_FILE_PATH = 'FL_MIMO_SAR_data.mat'
+
+# Curriculum Training Configuration
+NUM_CURRICULUM_STAGES = 5  # Train for 3 iteration depths (0, 1, 2)
+CURRICULUM_TRAINING_MODE = 'unsupervised'  # 'supervised' or 'unsupervised'
+CURRICULUM_RETRAINING_STRATEGY = 'from_scratch'  # 'from_scratch' or 'fine_tune'
+
+# Training Hyperparameters
+EPOCHS_PER_STAGE = 1000  # Epochs for each curriculum stage
+BATCH_SIZE = 64
+LEARNING_RATE = 1e-3
+
+# ADMM Configuration (for synthetic data generation)
+NUM_ADMM_STEPS = 2  # Fixed ADMM steps per iteration
+
+# Real-Valued Prior Enforcement
+ENFORCE_REAL_PRIOR = True  # True: enforce real-valued outputs, False: allow complex
+REAL_PRIOR_STRATEGY = 'hard_projection'  # Options: 'loss_penalty', 'hard_projection', 'hybrid'
+REAL_PRIOR_WEIGHT = 0.1  # Weight for imaginary penalty
+
+# Output
+MODEL_SAVE_PATH = 'denoiser_curriculum.pth'
+
+# -----------------------------------------------------------------
+# Helper Functions
+# -----------------------------------------------------------------
+
+def generate_synthetic_data(denoiser, admm_layer, x_input_batch, A_batch, device):
+    """
+    Generate synthetic data by passing through denoiser + ADMM
+    
+    Args:
+        denoiser: Trained denoiser model
+        admm_layer: ADMM layer with fixed parameters
+        x_input_batch: Input to denoiser [B, 2, N_theta]
+        A_batch: Steering matrix [B, 2, M_rx, N_theta]
+        device: torch device
+    
+    Returns:
+        x_after_admm: Output after denoiser + ADMM [B, 2, N_theta]
+    """
+    denoiser.eval()
+    with torch.no_grad():
+        x_input_batch = x_input_batch.to(device)
+        A_batch = A_batch.to(device)
+        
+        # Denoiser
+        x_denoised = denoiser(x_input_batch)
+        
+        # ADMM (need to compute y from x for ADMM input)
+        y_for_admm = complex_matmul(A_batch, x_input_batch)
+        u_init = torch.zeros_like(y_for_admm)
+        
+        # ADMM forward pass
+        x_after_admm, _ = admm_layer(x_denoised, y_for_admm, u_init)
+    
+    return x_after_admm
+
+
+def train_denoiser_one_stage(denoiser, dataloader, A_tensor, training_mode, 
+                              epochs, lr, device, stage_num):
+    """
+    Train denoiser for one curriculum stage
+    
+    Args:
+        denoiser: Denoiser model
+        dataloader: DataLoader with (x_input, x_gt, y_gt) tuples
+        A_tensor: Steering matrix [2, M_rx, N_theta]
+        training_mode: 'supervised' or 'unsupervised'
+        epochs: Number of epochs
+        lr: Learning rate
+        device: torch device
+        stage_num: Current stage number (for logging)
+    
+    Returns:
+        epoch_losses: List of average losses per epoch
+    """
+    optimizer = optim.Adam(denoiser.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+    
+    epoch_losses = []
+    
+    print(f"\n--- Stage {stage_num}: Training for {epochs} Epochs ---")
+    print(f"  Training mode: {training_mode}")
+    print(f"  Dataset size: {len(dataloader.dataset)} samples")
+    
+    for epoch in range(epochs):
+        denoiser.train()
+        batch_losses = []
+        
+        for batch_data in dataloader:
+            x_input_batch, x_gt_batch, y_gt_batch = batch_data
+            x_input_batch = x_input_batch.to(device)
+            x_gt_batch = x_gt_batch.to(device)
+            y_gt_batch = y_gt_batch.to(device)
+            
+            # Forward pass
+            x_denoised = denoiser(x_input_batch)
+            
+            # Apply real-valued prior enforcement if enabled
+            real_prior_penalty = torch.tensor(0.0, device=device)
+            if ENFORCE_REAL_PRIOR:
+                x_denoised, real_prior_penalty = enforce_real_prior(
+                    x_denoised, 
+                    strategy=REAL_PRIOR_STRATEGY,
+                    penalty_weight=REAL_PRIOR_WEIGHT
+                )
+            
+            # Compute loss
+            if training_mode == 'supervised':
+                loss = criterion(x_denoised, x_gt_batch) + real_prior_penalty
+            else:  # unsupervised
+                # Reconstruct measurements
+                A_batch = A_tensor.unsqueeze(0).expand(x_denoised.shape[0], -1, -1, -1).to(device)
+                y_pred = complex_matmul(A_batch, x_denoised)
+                loss = criterion(y_pred, y_gt_batch) + real_prior_penalty
+            
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            batch_losses.append(loss.item())
+        
+        avg_loss = np.mean(batch_losses)
+        epoch_losses.append(avg_loss)
+        
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"  Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.6f}")
+    
+    return epoch_losses
+
+
+def visualize_stage_losses(all_stage_losses, save_path='curriculum_stage_losses.png'):
+    """Plot loss curves for all curriculum stages"""
+    plt.figure(figsize=(14, 6))
+    
+    colors = plt.cm.viridis(np.linspace(0, 1, len(all_stage_losses)))
+    
+    for stage_num, losses in enumerate(all_stage_losses):
+        epochs = range(1, len(losses) + 1)
+        plt.plot(epochs, losses, color=colors[stage_num], 
+                linewidth=2, label=f'Stage {stage_num}')
+    
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.title('Curriculum Training: Loss per Stage', fontsize=14, fontweight='bold')
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.3)
+    plt.yscale('log')
+    
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"Stage losses plot saved to {save_path}")
+    plt.close()
+
+
+def visualize_final_denoiser(denoiser, dataset, A_tensor, training_mode, device,
+                             save_path='curriculum_final_output.png'):
+    """Visualize final denoiser output in image domain"""
+    denoiser.eval()
+    
+    # Get one sample
+    if dataset.has_ground_truth:
+        y_sample, x_gt_sample = dataset[0]
+    else:
+        y_sample = dataset[0]
+        x_gt_sample = None
+    
+    # Create matched filter input
+    A_batch = A_tensor.unsqueeze(0).to(device)
+    y_batch = y_sample.unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        x_noisy = complex_conj_transpose_matmul(A_batch, y_batch)
+        x_denoised = denoiser(x_noisy)
+    
+    # Convert to numpy
+    x_noisy_np = torch.abs(torch.view_as_complex(
+        x_noisy[0].permute(1, 0).contiguous())).cpu().numpy()
+    x_denoised_np = torch.abs(torch.view_as_complex(
+        x_denoised[0].permute(1, 0).contiguous())).cpu().numpy()
+    
+    if x_gt_sample is not None:
+        x_gt_np = torch.abs(torch.view_as_complex(
+            x_gt_sample.permute(1, 0).contiguous())).cpu().numpy()
+    else:
+        x_gt_np = None
+    
+    # Create angle axis
+    N_theta = x_noisy_np.shape[0]
+    theta = np.linspace(25.0, -25.0, N_theta)
+    
+    # Plot
+    plt.figure(figsize=(12, 6))
+    plt.plot(theta, x_noisy_np, 'r-', label='Noisy Input (A^H @ y)', 
+            linewidth=2, alpha=0.7)
+    plt.plot(theta, x_denoised_np, 'b-', label='Curriculum Denoiser Output', 
+            linewidth=2)
+    if x_gt_np is not None:
+        plt.plot(theta, x_gt_np, 'g--', label='Ground Truth', 
+                linewidth=2, alpha=0.7)
+    
+    plt.xlabel('Angle (degrees)', fontsize=12)
+    plt.ylabel('Magnitude', fontsize=12)
+    plt.title(f'Curriculum-Trained Denoiser Output ({training_mode.upper()})', 
+             fontsize=14, fontweight='bold')
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.3)
+    plt.xlim([25, -25])
+    
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"Final denoiser output saved to {save_path}")
+    plt.close()
+
+
+def visualize_measurement_domain(denoiser, dataset, A_tensor, device,
+                                 save_path='curriculum_measurement_domain.png'):
+    """Visualize measurement domain consistency"""
+    denoiser.eval()
+    
+    # Get one sample
+    if dataset.has_ground_truth:
+        y_sample, x_gt_sample = dataset[0]
+    else:
+        y_sample = dataset[0]
+    
+    # Create matched filter input
+    A_batch = A_tensor.unsqueeze(0).to(device)
+    y_batch = y_sample.unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        x_noisy = complex_conj_transpose_matmul(A_batch, y_batch)
+        x_denoised = denoiser(x_noisy)
+        y_hat = complex_matmul(A_batch, x_denoised)
+    
+    # Convert to complex numpy
+    y_gt_complex = torch.view_as_complex(
+        y_batch[0].permute(1, 0).contiguous()).cpu().numpy()
+    y_hat_complex = torch.view_as_complex(
+        y_hat[0].permute(1, 0).contiguous()).cpu().numpy()
+    
+    # Extract real and imaginary
+    y_gt_real = np.real(y_gt_complex)
+    y_gt_imag = np.imag(y_gt_complex)
+    y_hat_real = np.real(y_hat_complex)
+    y_hat_imag = np.imag(y_hat_complex)
+    
+    # Measurement indices
+    M_rx = y_gt_real.shape[0]
+    meas_idx = np.arange(M_rx)
+    
+    # Plot
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    
+    # Plot 1: Real Part
+    axes[0].plot(meas_idx, y_gt_real, 'go-', label='Ground Truth y (Real)', 
+                linewidth=2, markersize=6)
+    axes[0].plot(meas_idx, y_hat_real, 'b^--', label='Predicted y (Real)', 
+                linewidth=2, markersize=6, alpha=0.7)
+    axes[0].set_xlabel('Measurement Index', fontsize=11)
+    axes[0].set_ylabel('Real Part', fontsize=11)
+    axes[0].set_title('Curriculum Denoiser: Measurement Domain (Real)', 
+                     fontsize=12, fontweight='bold')
+    axes[0].legend(fontsize=10)
+    axes[0].grid(True, alpha=0.3)
+    
+    # Plot 2: Imaginary Part
+    axes[1].plot(meas_idx, y_gt_imag, 'go-', label='Ground Truth y (Imag)', 
+                linewidth=2, markersize=6)
+    axes[1].plot(meas_idx, y_hat_imag, 'b^--', label='Predicted y (Imag)', 
+                linewidth=2, markersize=6, alpha=0.7)
+    axes[1].set_xlabel('Measurement Index', fontsize=11)
+    axes[1].set_ylabel('Imaginary Part', fontsize=11)
+    axes[1].set_title('Curriculum Denoiser: Measurement Domain (Imaginary)', 
+                     fontsize=12, fontweight='bold')
+    axes[1].legend(fontsize=10)
+    axes[1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"Measurement domain plot saved to {save_path}")
+    plt.close()
+    
+    # Calculate MSE
+    mse_measurement = torch.mean((y_hat - y_batch) ** 2).item()
+    print(f"Final Measurement Domain MSE: {mse_measurement:.6e}")
+
+
+# -----------------------------------------------------------------
+# Main Training Loop
+# -----------------------------------------------------------------
+
+def main():
+    print("="*70)
+    print("PROGRESSIVE CURRICULUM TRAINING FOR DENOISER")
+    print("="*70)
+    print(f"Device: {DEVICE}")
+    print(f"Curriculum stages: {NUM_CURRICULUM_STAGES}")
+    print(f"Training mode: {CURRICULUM_TRAINING_MODE}")
+    print(f"Retraining strategy: {CURRICULUM_RETRAINING_STRATEGY}")
+    print(f"Epochs per stage: {EPOCHS_PER_STAGE}")
+    if ENFORCE_REAL_PRIOR:
+        print(f"Real prior: {REAL_PRIOR_STRATEGY} (weight={REAL_PRIOR_WEIGHT})")
+    else:
+        print(f"Real prior: DISABLED (complex outputs allowed)")
+    print("="*70)
+    
+    # -----------------------------------------------------------------
+    # 1. Load Original Dataset
+    # -----------------------------------------------------------------
+    print("\n[1] Loading original dataset...")
+    
+    # Determine if we need ground truth
+    need_ground_truth = (CURRICULUM_TRAINING_MODE == 'supervised')
+    
+    dataset = MIMOSAR_Dataset(MAT_FILE_PATH, return_ground_truth=need_ground_truth)
+    A_tensor = dataset.A.to(DEVICE)
+    
+    print(f"  Original dataset size: {len(dataset)} samples")
+    print(f"  Angle bins: {A_tensor.shape[2]}")
+    print(f"  Virtual antennas: {A_tensor.shape[1]}")
+    
+    # Extract original data
+    original_x_inputs = []  # A^H @ y for each sample
+    original_x_gts = []
+    original_ys = []
+    
+    A_batch = A_tensor.unsqueeze(0).to(DEVICE)
+    
+    for idx in range(len(dataset)):
+        if dataset.has_ground_truth:
+            y_sample, x_gt_sample = dataset[idx]
+            original_x_gts.append(x_gt_sample)
+        else:
+            y_sample = dataset[idx]
+            original_x_gts.append(None)
+        
+        original_ys.append(y_sample)
+        
+        # Compute matched filter output
+        y_batch = y_sample.unsqueeze(0).to(DEVICE)
+        with torch.no_grad():
+            x_mf = complex_conj_transpose_matmul(A_batch, y_batch)
+        original_x_inputs.append(x_mf.squeeze(0).cpu())
+    
+    print(f"  ✓ Original data prepared")
+    
+    # -----------------------------------------------------------------
+    # 2. Initialize Models
+    # -----------------------------------------------------------------
+    print("\n[2] Initializing models...")
+    
+    denoiser = CNNDenoiser().to(DEVICE)
+    admm_layer = DCLayer_ADMM(A_tensor, N_admm_steps=NUM_ADMM_STEPS).to(DEVICE)
+    
+    # Freeze ADMM parameters
+    for param in admm_layer.parameters():
+        param.requires_grad = False
+    
+    print(f"  ✓ Denoiser initialized")
+    print(f"  ✓ ADMM layer initialized (fixed parameters)")
+    
+    # -----------------------------------------------------------------
+    # 3. Curriculum Training Loop
+    # -----------------------------------------------------------------
+    all_stage_losses = []
+    accumulated_x_inputs = [torch.stack(original_x_inputs)]  # List of tensors
+    accumulated_x_gts = [torch.stack(original_x_gts) if original_x_gts[0] is not None 
+                        else None]
+    accumulated_ys = [torch.stack(original_ys)]
+    
+    total_start_time = time()
+    
+    for stage in range(NUM_CURRICULUM_STAGES):
+        print("\n" + "="*70)
+        print(f"CURRICULUM STAGE {stage}")
+        print("="*70)
+        
+        # Prepare dataset for this stage
+        # Concatenate all accumulated data
+        all_x_inputs = torch.cat(accumulated_x_inputs, dim=0)
+        all_ys = torch.cat(accumulated_ys, dim=0)
+        
+        if accumulated_x_gts[0] is not None:
+            # Repeat original ground truth for each synthetic sample
+            all_x_gts = []
+            for _ in range(len(accumulated_x_inputs)):
+                all_x_gts.append(accumulated_x_gts[0])
+            all_x_gts = torch.cat(all_x_gts, dim=0)
+        else:
+            all_x_gts = torch.zeros_like(all_x_inputs)  # Dummy (won't be used)
+        
+        # Create TensorDataset and DataLoader
+        tensor_dataset = TensorDataset(all_x_inputs, all_x_gts, all_ys)
+        dataloader = DataLoader(tensor_dataset, batch_size=BATCH_SIZE, shuffle=True)
+        
+        print(f"\nDataset for stage {stage}:")
+        print(f"  Total samples: {len(tensor_dataset)}")
+        print(f"  = {len(accumulated_x_inputs)} batches × {len(original_x_inputs)} original samples")
+        
+        # Retraining strategy
+        if stage > 0 and CURRICULUM_RETRAINING_STRATEGY == 'from_scratch':
+            print(f"  Reinitializing denoiser from scratch...")
+            denoiser = CNNDenoiser().to(DEVICE)
+        elif stage > 0:
+            print(f"  Fine-tuning existing denoiser...")
+        
+        # Train denoiser for this stage
+        stage_losses = train_denoiser_one_stage(
+            denoiser=denoiser,
+            dataloader=dataloader,
+            A_tensor=A_tensor,
+            training_mode=CURRICULUM_TRAINING_MODE,
+            epochs=EPOCHS_PER_STAGE,
+            lr=LEARNING_RATE,
+            device=DEVICE,
+            stage_num=stage
+        )
+        
+        all_stage_losses.append(stage_losses)
+        
+        print(f"\n  Stage {stage} complete!")
+        print(f"  Final loss: {stage_losses[-1]:.6e}")
+        
+        # Generate synthetic data for next stage (if not last stage)
+        if stage < NUM_CURRICULUM_STAGES - 1:
+            print(f"\n  Generating synthetic data for stage {stage + 1}...")
+            
+            synthetic_x_inputs = []
+            A_batch_expanded = A_tensor.unsqueeze(0).to(DEVICE)
+            
+            # Use the most recent accumulated inputs
+            current_inputs = accumulated_x_inputs[-1]
+            
+            # Generate in batches
+            num_batches = (len(current_inputs) + BATCH_SIZE - 1) // BATCH_SIZE
+            
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * BATCH_SIZE
+                end_idx = min(start_idx + BATCH_SIZE, len(current_inputs))
+                
+                x_input_batch = current_inputs[start_idx:end_idx]
+                A_batch = A_batch_expanded.expand(x_input_batch.shape[0], -1, -1, -1)
+                
+                x_after_admm = generate_synthetic_data(
+                    denoiser=denoiser,
+                    admm_layer=admm_layer,
+                    x_input_batch=x_input_batch,
+                    A_batch=A_batch,
+                    device=DEVICE
+                )
+                
+                synthetic_x_inputs.append(x_after_admm.cpu())
+            
+            synthetic_x_inputs = torch.cat(synthetic_x_inputs, dim=0)
+            
+            # Accumulate
+            accumulated_x_inputs.append(synthetic_x_inputs)
+            accumulated_ys.append(accumulated_ys[0])  # Same original ys
+            
+            print(f"    Generated {len(synthetic_x_inputs)} synthetic samples")
+            print(f"    Next stage will have {(stage + 2) * len(original_x_inputs)} total samples")
+    
+    total_time = time() - total_start_time
+    
+    print("\n" + "="*70)
+    print("CURRICULUM TRAINING COMPLETE")
+    print("="*70)
+    print(f"Total training time: {total_time:.2f} seconds")
+    print(f"Final dataset size: {len(tensor_dataset)} samples")
+    
+    # -----------------------------------------------------------------
+    # 4. Visualizations
+    # -----------------------------------------------------------------
+    print("\n[4] Generating visualizations...")
+    
+    # Loss curves
+    visualize_stage_losses(all_stage_losses, 
+                          save_path='curriculum_stage_losses.png')
+    
+    # Final denoiser output (image domain)
+    visualize_final_denoiser(denoiser, dataset, A_tensor, 
+                             CURRICULUM_TRAINING_MODE, DEVICE,
+                             save_path='curriculum_final_output.png')
+    
+    # Measurement domain
+    visualize_measurement_domain(denoiser, dataset, A_tensor, DEVICE,
+                                save_path='curriculum_measurement_domain.png')
+    
+    # -----------------------------------------------------------------
+    # 5. Save Model
+    # -----------------------------------------------------------------
+    print(f"\n[5] Saving curriculum-trained denoiser...")
+    torch.save(denoiser.state_dict(), MODEL_SAVE_PATH)
+    print(f"  ✓ Saved to: {MODEL_SAVE_PATH}")
+    
+    print("\n" + "="*70)
+    print("✅ ALL DONE!")
+    print("="*70)
+    print("\nNext steps:")
+    print("  1. Use the curriculum-trained denoiser in two-stage training:")
+    print(f"     python train_configurable.py")
+    print(f"       (Set PRETRAINED_DENOISER_PATH = '{MODEL_SAVE_PATH}')")
+    print("  2. Compare with standard denoiser training:")
+    print(f"     python train_denoiser_only.py")
+    print("="*70)
+
+
+if __name__ == '__main__':
+    main()
+

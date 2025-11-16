@@ -7,6 +7,8 @@ Deep learning-based image reconstruction for FMCW MIMO SAR using unrolled networ
 - **Unrolled Network Architecture**: Combines CNN denoiser with ADMM optimization
 - **Flexible Training Modes**: Supervised, unsupervised, and hybrid training
 - **Two Training Strategies**: End-to-end or two-stage (modular) training
+- **Curriculum Training**: Progressive learning to address domain shift in unrolled networks
+- **Real-Valued Prior Enforcement**: Leverage prior knowledge that reflectivity is real
 - **Progressive Visualization**: View intermediate outputs at each unrolled iteration
 - **Measurement Domain Analysis**: Visualize data consistency through the network
 - **Dynamic Dimensioning**: Automatically adapts to variable dataset sizes
@@ -26,6 +28,7 @@ MIMO_SAR/
 ├── train.py                            # Original unsupervised training script
 ├── train_configurable.py               # Configurable training (supervised/unsupervised/hybrid)
 ├── train_denoiser_only.py              # Standalone denoiser training (Stage 1)
+├── train_denoiser_curriculum.py        # Curriculum training for denoiser (addresses domain shift)
 │
 ├── test_unsupervised_model.py          # Test model on single sample
 ├── test_full_dataset.py                # Evaluate on full dataset
@@ -35,7 +38,8 @@ MIMO_SAR/
 │
 ├── FL_MIMO_SAR_data.mat                # Dataset (y, A, x)
 ├── dbp_model.pth                       # Saved model weights
-├── denoiser_pretrained.pth             # Pre-trained denoiser (for two-stage)
+├── denoiser_pretrained.pth             # Pre-trained denoiser (standard training)
+├── denoiser_curriculum.pth             # Curriculum-trained denoiser (robust to domain shift)
 │
 └── Documentation/
     ├── README.md                       # This file
@@ -43,6 +47,8 @@ MIMO_SAR/
     ├── SUPERVISED_TRAINING_GUIDE.md    # Supervised training guide
     ├── TWO_STAGE_TRAINING_GUIDE.md     # Two-stage training guide
     ├── TWO_STAGE_TRAINING_SUMMARY.md   # Two-stage quick reference
+    ├── CURRICULUM_TRAINING_GUIDE.md    # Curriculum training detailed guide
+    ├── CURRICULUM_TRAINING_QUICK_START.md # Curriculum training quick reference
     ├── ITERATION_VISUALIZATION_GUIDE.md # Visualization guide
     └── MEASUREMENT_DOMAIN_VISUALIZATION.md
 ```
@@ -90,7 +96,26 @@ python train_denoiser_only.py
 python train_configurable.py
 ```
 
-### 4. Testing
+### 4. Curriculum Training (Advanced)
+
+Train a denoiser that's robust to domain shift across unrolled iterations:
+
+```bash
+# Edit train_denoiser_curriculum.py to set:
+# NUM_CURRICULUM_STAGES = 3
+# CURRICULUM_TRAINING_MODE = 'unsupervised'  # or 'supervised'
+# CURRICULUM_RETRAINING_STRATEGY = 'from_scratch'  # or 'fine_tune'
+
+python train_denoiser_curriculum.py
+
+# Then use in two-stage training:
+python train_configurable.py
+# (with PRETRAINED_DENOISER_PATH = 'denoiser_curriculum.pth')
+```
+
+See `CURRICULUM_TRAINING_GUIDE.md` for details.
+
+### 5. Testing
 
 ```bash
 # Test on single sample
@@ -182,6 +207,62 @@ FREEZE_DENOISER = True  # or False for fine-tuning
 - Can mix supervised/unsupervised across stages
 
 See `TWO_STAGE_TRAINING_GUIDE.md` for detailed examples.
+
+---
+
+## 🎓 Curriculum Training (Advanced)
+
+### The Problem: Domain Shift
+
+When using a **shared denoiser** across multiple unrolled iterations, standard training creates a domain shift problem:
+
+- **Trained on**: `A^H @ y` (matched filter output)
+- **Iteration 1 sees**: `A^H @ y` ✅ Works well
+- **Iteration 2+ sees**: `x_after_ADMM` ❌ Different distribution → Poor performance
+
+### The Solution: Progressive Curriculum Training
+
+Train the denoiser on progressively accumulated synthetic data from deeper iterations:
+
+```
+Stage 0: Train on [A^H @ y]                                    → 51 samples
+Stage 1: Train on [A^H @ y, x_after_ADMM_0]                    → 102 samples  
+Stage 2: Train on [A^H @ y, x_after_ADMM_0, x_after_ADMM_1]    → 153 samples
+...
+```
+
+### Configuration
+
+```python
+# In train_denoiser_curriculum.py
+NUM_CURRICULUM_STAGES = 3          # Number of iteration depths
+CURRICULUM_TRAINING_MODE = 'unsupervised'  # or 'supervised'
+CURRICULUM_RETRAINING_STRATEGY = 'from_scratch'  # or 'fine_tune'
+EPOCHS_PER_STAGE = 200             # Epochs per curriculum stage
+```
+
+### Benefits
+
+- **Robustness**: Denoiser works well at all iteration depths
+- **Data Augmentation**: Expands small datasets with synthetic samples  
+- **Better Performance**: Addresses domain shift in later iterations
+- **Principled**: Based on curriculum learning theory
+
+### When to Use
+
+**✅ Use curriculum training when:**
+- Using a shared denoiser across multiple iterations
+- Observing performance degradation in later iterations
+- Have a small dataset (curriculum augments it)
+- Using two-stage training
+
+**❌ Use standard training when:**
+- Doing end-to-end training (denoiser + ADMM jointly)
+- Have a very large dataset already
+- Using per-iteration denoisers
+- Training time is critical
+
+See `CURRICULUM_TRAINING_GUIDE.md` for complete details and `CURRICULUM_TRAINING_QUICK_START.md` for quick reference.
 
 ---
 
@@ -333,12 +414,79 @@ NOISE_LEVEL = 0.1  # For supervised mode
 
 ---
 
+## 🎯 Real-Valued Prior Enforcement (NEW!)
+
+### The Problem
+
+If your target reflectivity is **real-valued** (no imaginary component), the network may still learn complex outputs because there's no explicit constraint in standard training.
+
+### The Solution
+
+Enforce real-valued outputs using three strategies:
+
+**1. Loss Penalty** (`loss_penalty`)
+- Adds penalty: `loss += λ * ||imaginary||²`
+- Soft constraint, smooth gradients
+- Use for gentle enforcement
+
+**2. Hard Projection** (`hard_projection`)
+- Sets imaginary channel to zero immediately
+- Exact real outputs guaranteed
+- Use when real-only is required
+
+**3. Hybrid** (`hybrid`) ⭐ **Recommended**
+- Combines penalty + projection
+- Best of both worlds
+- Default choice for most cases
+
+### Configuration
+
+Add to any training script:
+
+```python
+# Real-Valued Prior Enforcement
+ENFORCE_REAL_PRIOR = True  # Enable real prior
+REAL_PRIOR_STRATEGY = 'hybrid'  # 'loss_penalty', 'hard_projection', 'hybrid'
+REAL_PRIOR_WEIGHT = 0.1  # Penalty weight λ
+```
+
+### Quick Example
+
+```bash
+# Enable in your training script
+nano train_configurable.py
+# Set: ENFORCE_REAL_PRIOR = True
+#      REAL_PRIOR_STRATEGY = 'hybrid'
+#      REAL_PRIOR_WEIGHT = 0.1
+
+# Run training
+python train_configurable.py
+
+# Output will show:
+# --- Real Prior: HYBRID (weight=0.1) ---
+```
+
+### Benefits
+
+✅ Leverages prior knowledge that reflectivity is real  
+✅ Better reconstruction quality  
+✅ Simpler, more interpretable results  
+✅ Works with all training modes and strategies  
+✅ Easy to configure and use
+
+See `REAL_PRIOR_GUIDE.md` for complete details and examples.
+
+---
+
 ## 📚 Documentation
 
 - **QUICK_REFERENCE.md**: Complete quick reference card
 - **SUPERVISED_TRAINING_GUIDE.md**: Detailed supervised training guide
 - **TWO_STAGE_TRAINING_GUIDE.md**: Comprehensive two-stage training guide
 - **TWO_STAGE_TRAINING_SUMMARY.md**: Two-stage quick reference
+- **CURRICULUM_TRAINING_GUIDE.md**: Progressive curriculum training detailed guide
+- **CURRICULUM_TRAINING_QUICK_START.md**: Curriculum training quick reference
+- **REAL_PRIOR_GUIDE.md**: Real-valued prior enforcement guide
 - **ITERATION_VISUALIZATION_GUIDE.md**: Visualization features guide
 - **MEASUREMENT_DOMAIN_VISUALIZATION.md**: Measurement domain analysis
 

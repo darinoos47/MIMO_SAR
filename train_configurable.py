@@ -14,6 +14,7 @@ from visualization_utils import (plot_unrolled_iterations,
                                  plot_iteration_comparison,
                                  plot_mse_progression,
                                  plot_measurement_domain_progression)
+from real_prior import enforce_real_prior, measure_imaginary_magnitude
 
 # -----------------------------------------------------------------
 # 1. Configuration
@@ -31,14 +32,20 @@ NUM_UNROLLS = 5      # N1 in the paper: total unrolled iterations
 NUM_ADMM_STEPS = 2   # N2 in the paper: internal ADMM steps
 
 # *** NEW: Training Mode Configuration ***
-TRAINING_MODE = 'supervised'  # Options: 'supervised', 'unsupervised', 'hybrid'
+TRAINING_MODE = 'unsupervised'  # Options: 'supervised', 'unsupervised', 'hybrid'
 SUPERVISED_WEIGHT = 1.0   # Weight for supervised loss (image domain)
 UNSUPERVISED_WEIGHT = 1.0 # Weight for unsupervised loss (measurement domain)
 
 # *** NEW: Two-Stage Training Configuration ***
 TRAINING_STRATEGY = 'two_stage'  # Options: 'end_to_end', 'two_stage'
-PRETRAINED_DENOISER_PATH = 'denoiser_pretrained.pth'  # Path to pre-trained denoiser (for two_stage)
+PRETRAINED_DENOISER_PATH = 'denoiser_curriculum.pth'  # Path to pre-trained denoiser (for two_stage)
 FREEZE_DENOISER = True  # True: freeze denoiser (only train ADMM), False: fine-tune denoiser too
+
+# *** NEW: Real-Valued Prior Enforcement ***
+# If target reflectivity is known to be real (no imaginary component)
+ENFORCE_REAL_PRIOR = True  # True: enforce real-valued outputs, False: allow complex
+REAL_PRIOR_STRATEGY = 'hybrid'  # Options: 'loss_penalty', 'hard_projection', 'hybrid'
+REAL_PRIOR_WEIGHT = 0.1  # Weight for imaginary penalty (only for 'loss_penalty' and 'hybrid')
 
 # Note: If ground truth 'x' is not available, will automatically fall back to unsupervised mode
 
@@ -51,6 +58,10 @@ def main():
     print(f"--- Using device: {device} ---")
     print(f"--- Training Strategy: {TRAINING_STRATEGY.upper()} ---")
     print(f"--- Training Mode: {TRAINING_MODE.upper()} ---")
+    if ENFORCE_REAL_PRIOR:
+        print(f"--- Real Prior: {REAL_PRIOR_STRATEGY.upper()} (weight={REAL_PRIOR_WEIGHT}) ---")
+    else:
+        print(f"--- Real Prior: DISABLED (allowing complex outputs) ---")
 
     # -----------------------------------------------------------------
     # 3. Load Data
@@ -170,7 +181,17 @@ def main():
             # 1. Get the estimated reflectivity x_hat from the model
             x_hat_batch = model(y_batch)
             
-            # 2. Compute losses based on training mode
+            # 2. Apply real-valued prior enforcement if enabled
+            real_prior_penalty = torch.tensor(0.0)
+            if ENFORCE_REAL_PRIOR:
+                prior_strategy = REAL_PRIOR_STRATEGY if ENFORCE_REAL_PRIOR else 'none'
+                x_hat_batch, real_prior_penalty = enforce_real_prior(
+                    x_hat_batch, 
+                    strategy=prior_strategy,
+                    penalty_weight=REAL_PRIOR_WEIGHT
+                )
+            
+            # 3. Compute losses based on training mode
             total_loss = 0.0
             loss_supervised = torch.tensor(0.0)
             loss_unsupervised = torch.tensor(0.0)
@@ -178,13 +199,13 @@ def main():
             if actual_training_mode == 'supervised':
                 # Supervised: only image domain loss
                 loss_supervised = criterion_image(x_hat_batch, x_gt_batch)
-                total_loss = SUPERVISED_WEIGHT * loss_supervised
+                total_loss = SUPERVISED_WEIGHT * loss_supervised + real_prior_penalty
                 
             elif actual_training_mode == 'unsupervised':
                 # Unsupervised: only measurement domain loss
                 y_hat_batch = complex_matmul(A_batch_tensor, x_hat_batch)
                 loss_unsupervised = criterion_measurement(y_hat_batch, y_batch)
-                total_loss = UNSUPERVISED_WEIGHT * loss_unsupervised
+                total_loss = UNSUPERVISED_WEIGHT * loss_unsupervised + real_prior_penalty
                 
             elif actual_training_mode == 'hybrid':
                 # Hybrid: both losses
@@ -192,7 +213,8 @@ def main():
                 y_hat_batch = complex_matmul(A_batch_tensor, x_hat_batch)
                 loss_unsupervised = criterion_measurement(y_hat_batch, y_batch)
                 total_loss = (SUPERVISED_WEIGHT * loss_supervised + 
-                             UNSUPERVISED_WEIGHT * loss_unsupervised)
+                             UNSUPERVISED_WEIGHT * loss_unsupervised + 
+                             real_prior_penalty)
             
             # --- Backward Pass and Optimization ---
             # 1. Clear previous gradients
