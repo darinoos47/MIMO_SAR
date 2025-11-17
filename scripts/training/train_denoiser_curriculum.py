@@ -29,10 +29,9 @@ sys.path.insert(0, project_root)
 
 from time import time
 
-from core.models import CNNDenoiser, DCLayer_ADMM
+from core.models import CNNDenoiser, CNNDenoiser_RealOutput, CNNDenoiser_ComplexOutput, DCLayer_ADMM
 from core.data_loader import MIMOSAR_Dataset
 from core.utils import complex_matmul, complex_conj_transpose_matmul
-from core.real_prior import enforce_real_prior, measure_imaginary_magnitude
 
 # -----------------------------------------------------------------
 # Configuration
@@ -42,12 +41,12 @@ from core.real_prior import enforce_real_prior, measure_imaginary_magnitude
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Data
-MAT_FILE_PATH = '../../data/FL_MIMO_SAR_data.mat'
+MAT_FILE_PATH = 'data/FL_MIMO_SAR_data.mat'
 
 # Curriculum Training Configuration
 NUM_CURRICULUM_STAGES = 5  # Train for 3 iteration depths (0, 1, 2)
 CURRICULUM_TRAINING_MODE = 'unsupervised'  # 'supervised' or 'unsupervised'
-CURRICULUM_RETRAINING_STRATEGY = 'from_scratch'  # 'from_scratch' or 'fine_tune'
+CURRICULUM_RETRAINING_STRATEGY = 'fine_tune'  # 'from_scratch' or 'fine_tune'
 
 # Training Hyperparameters
 EPOCHS_PER_STAGE = 1000  # Epochs for each curriculum stage
@@ -57,13 +56,13 @@ LEARNING_RATE = 1e-3
 # ADMM Configuration (for synthetic data generation)
 NUM_ADMM_STEPS = 2  # Fixed ADMM steps per iteration
 
-# Real-Valued Prior Enforcement
-ENFORCE_REAL_PRIOR = True  # True: enforce real-valued outputs, False: allow complex
-REAL_PRIOR_STRATEGY = 'hard_projection'  # Options: 'loss_penalty', 'hard_projection', 'hybrid'
-REAL_PRIOR_WEIGHT = 0.1  # Weight for imaginary penalty
+# Denoiser Architecture Selection
+DENOISER_TYPE = 'real'  # Options: 'real' (best for real targets, ~62K params)
+                        #          'complex' (allows imaginary, ~62K params)
+                        #          'original' (shallow residual, ~3.6K params)
 
 # Output
-MODEL_SAVE_PATH = '../../checkpoints/denoiser_curriculum.pth'
+MODEL_SAVE_PATH = 'checkpoints/denoiser_curriculum.pth'
 
 # -----------------------------------------------------------------
 # Helper Functions
@@ -139,25 +138,17 @@ def train_denoiser_one_stage(denoiser, dataloader, A_tensor, training_mode,
             y_gt_batch = y_gt_batch.to(device)
             
             # Forward pass
+            # (real-valued prior is enforced at architecture level if DENOISER_TYPE='real')
             x_denoised = denoiser(x_input_batch)
-            
-            # Apply real-valued prior enforcement if enabled
-            real_prior_penalty = torch.tensor(0.0, device=device)
-            if ENFORCE_REAL_PRIOR:
-                x_denoised, real_prior_penalty = enforce_real_prior(
-                    x_denoised, 
-                    strategy=REAL_PRIOR_STRATEGY,
-                    penalty_weight=REAL_PRIOR_WEIGHT
-                )
             
             # Compute loss
             if training_mode == 'supervised':
-                loss = criterion(x_denoised, x_gt_batch) + real_prior_penalty
+                loss = criterion(x_denoised, x_gt_batch)
             else:  # unsupervised
                 # Reconstruct measurements
                 A_batch = A_tensor.unsqueeze(0).expand(x_denoised.shape[0], -1, -1, -1).to(device)
                 y_pred = complex_matmul(A_batch, x_denoised)
-                loss = criterion(y_pred, y_gt_batch) + real_prior_penalty
+                loss = criterion(y_pred, y_gt_batch)
             
             # Backward pass
             optimizer.zero_grad()
@@ -205,9 +196,9 @@ def visualize_final_denoiser(denoiser, dataset, A_tensor, training_mode, device,
     
     # Get one sample
     if dataset.has_ground_truth:
-        y_sample, x_gt_sample = dataset[0]
+        y_sample, x_gt_sample = dataset[20]
     else:
-        y_sample = dataset[0]
+        y_sample = dataset[20]
         x_gt_sample = None
     
     # Create matched filter input
@@ -344,10 +335,7 @@ def main():
     print(f"Training mode: {CURRICULUM_TRAINING_MODE}")
     print(f"Retraining strategy: {CURRICULUM_RETRAINING_STRATEGY}")
     print(f"Epochs per stage: {EPOCHS_PER_STAGE}")
-    if ENFORCE_REAL_PRIOR:
-        print(f"Real prior: {REAL_PRIOR_STRATEGY} (weight={REAL_PRIOR_WEIGHT})")
-    else:
-        print(f"Real prior: DISABLED (complex outputs allowed)")
+    print(f"Denoiser type: {DENOISER_TYPE}")
     print("="*70)
     
     # -----------------------------------------------------------------
@@ -395,7 +383,19 @@ def main():
     # -----------------------------------------------------------------
     print("\n[2] Initializing models...")
     
-    denoiser = CNNDenoiser().to(DEVICE)
+    # Create denoiser based on DENOISER_TYPE
+    if DENOISER_TYPE == 'real':
+        denoiser = CNNDenoiser_RealOutput().to(DEVICE)
+        print(f"  Using CNNDenoiser_RealOutput (Deep, 1 channel, ~62K params)")
+    elif DENOISER_TYPE == 'complex':
+        denoiser = CNNDenoiser_ComplexOutput().to(DEVICE)
+        print(f"  Using CNNDenoiser_ComplexOutput (Deep, 2 channels, ~62K params)")
+    elif DENOISER_TYPE == 'original':
+        denoiser = CNNDenoiser().to(DEVICE)
+        print(f"  Using CNNDenoiser (Shallow residual, 2 channels, ~3.6K params)")
+    else:
+        raise ValueError(f"Unknown DENOISER_TYPE: {DENOISER_TYPE}")
+    
     admm_layer = DCLayer_ADMM(A_tensor, N_admm_steps=NUM_ADMM_STEPS).to(DEVICE)
     
     # Freeze ADMM parameters
@@ -446,7 +446,13 @@ def main():
         # Retraining strategy
         if stage > 0 and CURRICULUM_RETRAINING_STRATEGY == 'from_scratch':
             print(f"  Reinitializing denoiser from scratch...")
-            denoiser = CNNDenoiser().to(DEVICE)
+            # Recreate denoiser based on type
+            if DENOISER_TYPE == 'real':
+                denoiser = CNNDenoiser_RealOutput().to(DEVICE)
+            elif DENOISER_TYPE == 'complex':
+                denoiser = CNNDenoiser_ComplexOutput().to(DEVICE)
+            elif DENOISER_TYPE == 'original':
+                denoiser = CNNDenoiser().to(DEVICE)
         elif stage > 0:
             print(f"  Fine-tuning existing denoiser...")
         

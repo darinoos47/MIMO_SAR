@@ -15,14 +15,14 @@ sys.path.insert(0, project_root)
 
 
 from core.data_loader import MIMOSAR_Dataset
-from core.models import CNNDenoiser
+from core.models import CNNDenoiser, CNNDenoiser_RealOutput, CNNDenoiser_ComplexOutput
 from core.utils import complex_matmul, complex_conj_transpose_matmul
 
 # -----------------------------------------------------------------
 # 1. Configuration
 # -----------------------------------------------------------------
-MAT_FILE = '../../data/FL_MIMO_SAR_data.mat'
-MODEL_SAVE_PATH = '../../checkpoints/denoiser_pretrained.pth'
+MAT_FILE = 'data/FL_MIMO_SAR_data.mat'
+MODEL_SAVE_PATH = 'checkpoints/denoiser_pretrained.pth'
 
 # Training Hyperparameters
 NUM_EPOCHS = 500
@@ -30,7 +30,13 @@ BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 
 # *** Denoiser Training Mode ***
-DENOISER_TRAINING_MODE = 'supervised'  # Options: 'supervised', 'unsupervised'
+DENOISER_TRAINING_MODE = 'unsupervised'  # Options: 'supervised', 'unsupervised'
+
+# *** Denoiser Architecture Selection ***
+DENOISER_TYPE = 'real'  # Options: 'real' (best for real targets, ~62K params)
+                        #          'complex' (allows imaginary, ~62K params)
+                        #          'original' (shallow residual, ~3.6K params, backward compatible)
+# Note: 'real' architecture enforces imaginary=0 at the architecture level (2.46× better than 'complex')
 
 # Noise parameters (for supervised training)
 NOISE_LEVEL = 0.0001  # Std dev of synthetic noise added to input
@@ -42,7 +48,8 @@ def main():
     # Set device (GPU if available, otherwise CPU)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"--- Using device: {device} ---")
-    print(f"--- Denoiser Training Mode: {DENOISER_TRAINING_MODE.upper()} ---\n")
+    print(f"--- Denoiser Training Mode: {DENOISER_TRAINING_MODE.upper()} ---")
+    print(f"--- Denoiser Architecture: {DENOISER_TYPE.upper()} ---\n")
 
     # -----------------------------------------------------------------
     # 3. Load Data
@@ -81,7 +88,20 @@ def main():
     # 4. Initialize Model, Loss, and Optimizer
     # -----------------------------------------------------------------
     print("Initializing denoiser model...")
-    model = CNNDenoiser().to(device)
+    
+    # Create denoiser based on DENOISER_TYPE
+    if DENOISER_TYPE == 'real':
+        model = CNNDenoiser_RealOutput().to(device)
+        print(f"  Using CNNDenoiser_RealOutput (Deep, 1 channel, ~62K params)")
+    elif DENOISER_TYPE == 'complex':
+        model = CNNDenoiser_ComplexOutput().to(device)
+        print(f"  Using CNNDenoiser_ComplexOutput (Deep, 2 channels, ~62K params)")
+    elif DENOISER_TYPE == 'original':
+        model = CNNDenoiser().to(device)
+        print(f"  Using CNNDenoiser (Shallow residual, 2 channels, ~3.6K params)")
+    else:
+        raise ValueError(f"Unknown DENOISER_TYPE: {DENOISER_TYPE}. "
+                        f"Choose from: 'real', 'complex', 'original'")
     
     # Loss function
     criterion = nn.MSELoss()
@@ -90,6 +110,8 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
     print(f"Denoiser Training Configuration:")
+    print(f"  Architecture: {DENOISER_TYPE}")
+    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  Mode: {actual_training_mode}")
     print(f"  Epochs: {NUM_EPOCHS}")
     print(f"  Batch size: {BATCH_SIZE}")

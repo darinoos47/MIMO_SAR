@@ -9,7 +9,13 @@ This package contains the core functionality for MIMO SAR deep learning:
 - real_prior: Real-valued prior enforcement utilities
 """
 
-from .models import CNNDenoiser, DCLayer_ADMM, DBPNet
+from .models import (
+    CNNDenoiser, 
+    CNNDenoiser_RealOutput, 
+    CNNDenoiser_ComplexOutput,
+    DCLayer_ADMM, 
+    DBPNet
+)
 from .data_loader import MIMOSAR_Dataset
 from .utils import complex_matmul, complex_conj_transpose_matmul, complex_to_tensor
 from .visualization_utils import (
@@ -23,6 +29,8 @@ from .real_prior import enforce_real_prior, measure_imaginary_magnitude
 __all__ = [
     # Models
     'CNNDenoiser',
+    'CNNDenoiser_RealOutput',
+    'CNNDenoiser_ComplexOutput',
     'DCLayer_ADMM',
     'DBPNet',
     # Data
