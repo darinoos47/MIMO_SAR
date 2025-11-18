@@ -25,7 +25,7 @@ MAT_FILE = 'data/FL_MIMO_SAR_data.mat'
 MODEL_SAVE_PATH = 'checkpoints/denoiser_pretrained.pth'
 
 # Training Hyperparameters
-NUM_EPOCHS = 500
+NUM_EPOCHS = 1000
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 
@@ -37,6 +37,12 @@ DENOISER_TYPE = 'real'  # Options: 'real' (best for real targets, ~62K params)
                         #          'complex' (allows imaginary, ~62K params)
                         #          'original' (shallow residual, ~3.6K params, backward compatible)
 # Note: 'real' architecture enforces imaginary=0 at the architecture level (2.46× better than 'complex')
+
+# *** Positivity Enforcement ***
+# Physical constraint: Reflectivity cannot be negative (enforced at architecture level)
+ENFORCE_POSITIVITY = True  # True: Add ReLU to enforce output ≥ 0 (only for DENOISER_TYPE='real')
+                           # False: Allow negative values
+# Note: Only applies to 'real' denoiser. Ignored for 'complex' and 'original' types.
 
 # Noise parameters (for supervised training)
 NOISE_LEVEL = 0.0001  # Std dev of synthetic noise added to input
@@ -91,8 +97,9 @@ def main():
     
     # Create denoiser based on DENOISER_TYPE
     if DENOISER_TYPE == 'real':
-        model = CNNDenoiser_RealOutput().to(device)
-        print(f"  Using CNNDenoiser_RealOutput (Deep, 1 channel, ~62K params)")
+        model = CNNDenoiser_RealOutput(enforce_positivity=ENFORCE_POSITIVITY).to(device)
+        positivity_str = " + Positivity" if ENFORCE_POSITIVITY else ""
+        print(f"  Using CNNDenoiser_RealOutput (Deep, 1 channel, ~62K params{positivity_str})")
     elif DENOISER_TYPE == 'complex':
         model = CNNDenoiser_ComplexOutput().to(device)
         print(f"  Using CNNDenoiser_ComplexOutput (Deep, 2 channels, ~62K params)")
@@ -334,4 +341,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

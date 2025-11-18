@@ -61,6 +61,9 @@ DENOISER_TYPE = 'real'  # Options: 'real' (best for real targets, ~62K params)
                         #          'complex' (allows imaginary, ~62K params)
                         #          'original' (shallow residual, ~3.6K params)
 
+# Positivity Enforcement
+ENFORCE_POSITIVITY = True  # True: Add ReLU to enforce output ≥ 0 (only for DENOISER_TYPE='real')
+
 # Output
 MODEL_SAVE_PATH = 'checkpoints/denoiser_curriculum.pth'
 
@@ -385,8 +388,9 @@ def main():
     
     # Create denoiser based on DENOISER_TYPE
     if DENOISER_TYPE == 'real':
-        denoiser = CNNDenoiser_RealOutput().to(DEVICE)
-        print(f"  Using CNNDenoiser_RealOutput (Deep, 1 channel, ~62K params)")
+        denoiser = CNNDenoiser_RealOutput(enforce_positivity=ENFORCE_POSITIVITY).to(DEVICE)
+        positivity_str = " + Positivity" if ENFORCE_POSITIVITY else ""
+        print(f"  Using CNNDenoiser_RealOutput (Deep, 1 channel, ~62K params{positivity_str})")
     elif DENOISER_TYPE == 'complex':
         denoiser = CNNDenoiser_ComplexOutput().to(DEVICE)
         print(f"  Using CNNDenoiser_ComplexOutput (Deep, 2 channels, ~62K params)")
@@ -448,7 +452,7 @@ def main():
             print(f"  Reinitializing denoiser from scratch...")
             # Recreate denoiser based on type
             if DENOISER_TYPE == 'real':
-                denoiser = CNNDenoiser_RealOutput().to(DEVICE)
+                denoiser = CNNDenoiser_RealOutput(enforce_positivity=ENFORCE_POSITIVITY).to(DEVICE)
             elif DENOISER_TYPE == 'complex':
                 denoiser = CNNDenoiser_ComplexOutput().to(DEVICE)
             elif DENOISER_TYPE == 'original':
@@ -559,4 +563,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

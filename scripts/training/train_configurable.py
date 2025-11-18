@@ -55,6 +55,12 @@ DENOISER_TYPE = 'real'  # Options: 'real' (best for real targets, ~62K params)
                         #          'original' (shallow residual, ~3.6K params, backward compatible)
 # Note: 'real' architecture enforces imaginary=0 at the architecture level (2.46× better than 'complex')
 
+# *** Positivity Enforcement ***
+# Physical constraint: Reflectivity cannot be negative (enforced at architecture level)
+ENFORCE_POSITIVITY = True  # True: Add ReLU to enforce output ≥ 0 (only for DENOISER_TYPE='real')
+                           # False: Allow negative values
+# Note: Only applies to 'real' denoiser. Ignored for 'complex' and 'original' types.
+
 # Note: If ground truth 'x' is not available, will automatically fall back to unsupervised mode
 
 # -----------------------------------------------------------------
@@ -67,6 +73,8 @@ def main():
     print(f"--- Training Strategy: {TRAINING_STRATEGY.upper()} ---")
     print(f"--- Training Mode: {TRAINING_MODE.upper()} ---")
     print(f"--- Denoiser Type: {DENOISER_TYPE.upper()} ---")
+    if DENOISER_TYPE == 'real':
+        print(f"--- Enforce Positivity: {ENFORCE_POSITIVITY} ---")
 
     # -----------------------------------------------------------------
     # 3. Load Data
@@ -110,7 +118,8 @@ def main():
         A_tensor, 
         num_iterations=NUM_UNROLLS, 
         N_admm_steps=NUM_ADMM_STEPS,
-        denoiser_type=DENOISER_TYPE
+        denoiser_type=DENOISER_TYPE,
+        enforce_positivity=ENFORCE_POSITIVITY
     ).to(device)
     
     # Handle two-stage training: load pre-trained denoiser

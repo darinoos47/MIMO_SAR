@@ -25,6 +25,7 @@ sys.path.insert(0, project_root)
 
 from core.data_loader import MIMOSAR_Dataset
 from core.utils import complex_matmul, complex_conj_transpose_matmul
+from core.models import CNNDenoiser_RealOutput, CNNDenoiser_ComplexOutput, CNNDenoiser
 
 # -----------------------------------------------------------------
 # Configuration
@@ -46,155 +47,12 @@ RESULTS_DIR = 'results/comparison_three_denoisers/'
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # -----------------------------------------------------------------
-# Denoiser Architectures
-# -----------------------------------------------------------------
-
-class CNNDenoiser_RealOutput(nn.Module):
-    """
-    CNN Denoiser with Real-Only Output
-    Input: 2 channels (real, imaginary)
-    Output: 1 channel (real only)
-    """
-    def __init__(self, in_channels=2, out_channels=1, num_filters=32, kernel_size=3):
-        super(CNNDenoiser_RealOutput, self).__init__()
-        
-        padding = kernel_size // 2
-        
-        self.encoder = nn.Sequential(
-            nn.Conv1d(in_channels, num_filters, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv1d(num_filters, num_filters * 2, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters * 2),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv1d(num_filters * 2, num_filters * 4, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters * 4),
-            nn.ReLU(inplace=True),
-        )
-        
-        self.decoder = nn.Sequential(
-            nn.Conv1d(num_filters * 4, num_filters * 2, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters * 2),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv1d(num_filters * 2, num_filters, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv1d(num_filters, out_channels, kernel_size, padding=padding, bias=True),
-        )
-    
-    def forward(self, x):
-        """
-        Args:
-            x: [batch, 2, N] - complex input (real, imag)
-        Returns:
-            x_out: [batch, 2, N] - output with real channel filled, imag=0
-        """
-        # Encode and decode to get real part only
-        z = self.encoder(x)
-        real_part = self.decoder(z)  # [batch, 1, N]
-        
-        # Create 2-channel output with imaginary part = 0
-        batch_size, _, N = x.shape
-        x_out = torch.zeros(batch_size, 2, N, device=x.device)
-        x_out[:, 0:1, :] = real_part  # Real channel
-        # x_out[:, 1, :] remains zero (imaginary)
-        
-        return x_out
-
-
-class CNNDenoiser_ComplexOutput(nn.Module):
-    """
-    CNN Denoiser with Complex Output (deep encoder-decoder)
-    Input: 2 channels (real, imaginary)
-    Output: 2 channels (real, imaginary)
-    """
-    def __init__(self, in_channels=2, out_channels=2, num_filters=32, kernel_size=3):
-        super(CNNDenoiser_ComplexOutput, self).__init__()
-        
-        padding = kernel_size // 2
-        
-        self.encoder = nn.Sequential(
-            nn.Conv1d(in_channels, num_filters, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv1d(num_filters, num_filters * 2, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters * 2),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv1d(num_filters * 2, num_filters * 4, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters * 4),
-            nn.ReLU(inplace=True),
-        )
-        
-        self.decoder = nn.Sequential(
-            nn.Conv1d(num_filters * 4, num_filters * 2, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters * 2),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv1d(num_filters * 2, num_filters, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv1d(num_filters, out_channels, kernel_size, padding=padding, bias=True),
-        )
-    
-    def forward(self, x):
-        """
-        Args:
-            x: [batch, 2, N] - complex input (real, imag)
-        Returns:
-            x_out: [batch, 2, N] - complex output (real, imag)
-        """
-        z = self.encoder(x)
-        x_out = self.decoder(z)
-        return x_out
-
-
-class CNNDenoiser_Original(nn.Module):
-    """
-    Original CNNDenoiser from core/models.py (shallow residual architecture)
-    Input: 2 channels (real, imaginary)
-    Output: 2 channels (real, imaginary)
-    Key feature: RESIDUAL CONNECTION (output = input + CNN(input))
-    """
-    def __init__(self, in_channels=2, out_channels=2, num_filters=32, kernel_size=3):
-        super(CNNDenoiser_Original, self).__init__()
-        padding = (kernel_size - 1) // 2
-        
-        self.conv_block_1 = nn.Sequential(
-            nn.Conv1d(in_channels, num_filters, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters),
-            nn.ReLU(inplace=True)
-        )
-        self.conv_block_2 = nn.Sequential(
-            nn.Conv1d(num_filters, num_filters, kernel_size, padding=padding, bias=False),
-            nn.BatchNorm1d(num_filters),
-            nn.ReLU(inplace=True)
-        )
-        self.conv_final = nn.Conv1d(num_filters, out_channels, kernel_size, padding=padding, bias=True)
-
-    def forward(self, x):
-        """
-        Args:
-            x: [batch, 2, N] - complex input (real, imag)
-        Returns:
-            x_out: [batch, 2, N] - complex output with residual connection
-        """
-        identity = x
-        out = self.conv_block_1(x)
-        out = self.conv_block_2(out)
-        out = self.conv_final(out)
-        return identity + out  # Residual connection
-
-
-# -----------------------------------------------------------------
 # Training Function
 # -----------------------------------------------------------------
+# Note: Using denoiser architectures from core.models:
+#   - CNNDenoiser_RealOutput: Deep encoder-decoder, 1 output channel (real only)
+#   - CNNDenoiser_ComplexOutput: Deep encoder-decoder, 2 output channels (real + imag)
+#   - CNNDenoiser: Original shallow residual network, 2 output channels
 
 def train_denoiser(denoiser, dataloader, A_tensor, num_epochs, lr, device, model_name):
     """
@@ -556,9 +414,9 @@ def main():
     
     # Initialize models
     print("\n[2] Initializing models...")
-    denoiser_real = CNNDenoiser_RealOutput(in_channels=2, out_channels=1).to(DEVICE)
+    denoiser_real = CNNDenoiser_RealOutput(in_channels=2, out_channels=1, enforce_positivity=False).to(DEVICE)
     denoiser_complex = CNNDenoiser_ComplexOutput(in_channels=2, out_channels=2).to(DEVICE)
-    denoiser_original = CNNDenoiser_Original(in_channels=2, out_channels=2).to(DEVICE)
+    denoiser_original = CNNDenoiser(in_channels=2, out_channels=2).to(DEVICE)
     
     print(f"  ✓ Real-Only Denoiser: {sum(p.numel() for p in denoiser_real.parameters()):,} parameters")
     print(f"  ✓ Complex Denoiser: {sum(p.numel() for p in denoiser_complex.parameters()):,} parameters")

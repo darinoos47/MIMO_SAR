@@ -52,14 +52,17 @@ class CNNDenoiser_RealOutput(nn.Module):
     - Deep architecture: 6 convolutional layers
     - 1 output channel (REAL ONLY) - enforces physical constraint at architecture level
     - Imaginary part is forced to zero by design
+    - Optional positivity enforcement (ReLU) for non-negative reflectivity
     - ~62,369 parameters
     
     Performance: Best results for real-valued targets (2.46× better than complex output)
     Use case: When target reflectivity is known to be real-valued (MIMO SAR)
     """
-    def __init__(self, in_channels=2, out_channels=1, num_filters=32, kernel_size=3):
+    def __init__(self, in_channels=2, out_channels=1, num_filters=32, kernel_size=3,
+                 enforce_positivity=True):
         super(CNNDenoiser_RealOutput, self).__init__()
         
+        self.enforce_positivity = enforce_positivity
         padding = kernel_size // 2
         
         # Encoder: progressively increase channels
@@ -78,7 +81,7 @@ class CNNDenoiser_RealOutput(nn.Module):
         )
         
         # Decoder: progressively decrease channels to 1 (real only)
-        self.decoder = nn.Sequential(
+        decoder_layers = [
             nn.Conv1d(num_filters * 4, num_filters * 2, kernel_size, padding=padding, bias=False),
             nn.BatchNorm1d(num_filters * 2),
             nn.ReLU(inplace=True),
@@ -88,7 +91,13 @@ class CNNDenoiser_RealOutput(nn.Module):
             nn.ReLU(inplace=True),
             
             nn.Conv1d(num_filters, out_channels, kernel_size, padding=padding, bias=True),  # out_channels=1
-        )
+        ]
+        
+        # Optionally add ReLU to enforce positivity (reflectivity ≥ 0)
+        if self.enforce_positivity:
+            decoder_layers.append(nn.ReLU())
+        
+        self.decoder = nn.Sequential(*decoder_layers)
     
     def forward(self, x):
         """
@@ -445,20 +454,24 @@ class DBPNet(nn.Module):
             - 'real': Deep encoder-decoder with real-only output (62K params, best for real targets)
             - 'complex': Deep encoder-decoder with complex output (62K params)
         num_filters: Number of filters in first layer (default: 32)
+        enforce_positivity: If True, enforce non-negative output (only for 'real' denoiser)
     """
     def __init__(self, A_tensor, num_iterations=5, N_admm_steps=3, 
-                 denoiser_type='original', num_filters=32):
+                 denoiser_type='original', num_filters=32, enforce_positivity=True):
         super(DBPNet, self).__init__()
         self.num_iterations = num_iterations
         self.denoiser_type = denoiser_type
+        self.enforce_positivity = enforce_positivity
         
         self.register_buffer('A', A_tensor)
         
         # Select denoiser architecture based on type
         if denoiser_type == 'real':
-            print(f"Using CNNDenoiser_RealOutput (Deep, 1 channel, ~62K params)")
+            positivity_str = " + Positivity" if enforce_positivity else ""
+            print(f"Using CNNDenoiser_RealOutput (Deep, 1 channel, ~62K params{positivity_str})")
             self.denoiser = CNNDenoiser_RealOutput(in_channels=2, out_channels=1, 
-                                                   num_filters=num_filters)
+                                                   num_filters=num_filters,
+                                                   enforce_positivity=enforce_positivity)
         elif denoiser_type == 'complex':
             print(f"Using CNNDenoiser_ComplexOutput (Deep, 2 channels, ~62K params)")
             self.denoiser = CNNDenoiser_ComplexOutput(in_channels=2, out_channels=2, 
