@@ -36,7 +36,7 @@ LEARNING_RATE = 1e-4
 
 # Model Hyperparameters
 NUM_UNROLLS = 5      # N1 in the paper: total unrolled iterations
-NUM_ADMM_STEPS = 2   # N2 in the paper: internal ADMM steps
+NUM_ADMM_STEPS = 1   # N2 in the paper: internal ADMM steps
 
 # *** NEW: Training Mode Configuration ***
 TRAINING_MODE = 'unsupervised'  # Options: 'supervised', 'unsupervised', 'hybrid'
@@ -60,6 +60,12 @@ DENOISER_TYPE = 'real'  # Options: 'real' (best for real targets, ~62K params)
 ENFORCE_POSITIVITY = True  # True: Add ReLU to enforce output ≥ 0 (only for DENOISER_TYPE='real')
                            # False: Allow negative values
 # Note: Only applies to 'real' denoiser. Ignored for 'complex' and 'original' types.
+
+# *** ADMM Physical Constraints ***
+# Enforce physical constraints directly in ADMM optimization (as per MATLAB implementation)
+ADMM_ENFORCE_REAL = True        # True: Project ADMM x-update to real values (discard imaginary)
+ADMM_ENFORCE_POSITIVITY = True  # True: Clamp ADMM x-update to non-negative values
+# Note: These are HARD constraints in optimization (not learned). Independent from denoiser constraints.
 
 # Note: If ground truth 'x' is not available, will automatically fall back to unsupervised mode
 
@@ -119,7 +125,9 @@ def main():
         num_iterations=NUM_UNROLLS, 
         N_admm_steps=NUM_ADMM_STEPS,
         denoiser_type=DENOISER_TYPE,
-        enforce_positivity=ENFORCE_POSITIVITY
+        enforce_positivity=ENFORCE_POSITIVITY,
+        admm_enforce_real=ADMM_ENFORCE_REAL,
+        admm_enforce_positivity=ADMM_ENFORCE_POSITIVITY
     ).to(device)
     
     # Handle two-stage training: load pre-trained denoiser

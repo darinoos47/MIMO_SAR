@@ -44,7 +44,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MAT_FILE_PATH = 'data/FL_MIMO_SAR_data.mat'
 
 # Curriculum Training Configuration
-NUM_CURRICULUM_STAGES = 5  # Train for 3 iteration depths (0, 1, 2)
+NUM_CURRICULUM_STAGES = 3  # Train for 3 iteration depths (0, 1, 2)
 CURRICULUM_TRAINING_MODE = 'unsupervised'  # 'supervised' or 'unsupervised'
 CURRICULUM_RETRAINING_STRATEGY = 'fine_tune'  # 'from_scratch' or 'fine_tune'
 
@@ -57,12 +57,16 @@ LEARNING_RATE = 1e-3
 NUM_ADMM_STEPS = 2  # Fixed ADMM steps per iteration
 
 # Denoiser Architecture Selection
-DENOISER_TYPE = 'real'  # Options: 'real' (best for real targets, ~62K params)
+DENOISER_TYPE = 'complex'  # Options: 'real' (best for real targets, ~62K params)
                         #          'complex' (allows imaginary, ~62K params)
                         #          'original' (shallow residual, ~3.6K params)
 
 # Positivity Enforcement
-ENFORCE_POSITIVITY = True  # True: Add ReLU to enforce output ≥ 0 (only for DENOISER_TYPE='real')
+ENFORCE_POSITIVITY = False  # True: Add ReLU to enforce output ≥ 0 (only for DENOISER_TYPE='real')
+
+# ADMM Physical Constraints (for synthetic data generation)
+ADMM_ENFORCE_REAL = False        # True: Project ADMM x-update to real values (discard imaginary)
+ADMM_ENFORCE_POSITIVITY = False  # True: Clamp ADMM x-update to non-negative values
 
 # Output
 MODEL_SAVE_PATH = 'checkpoints/denoiser_curriculum.pth'
@@ -257,6 +261,131 @@ def visualize_final_denoiser(denoiser, dataset, A_tensor, training_mode, device,
     plt.close()
 
 
+def visualize_unrolled_network(denoiser, admm_layer, dataset, A_tensor, 
+                                training_mode, device, num_iterations=5,
+                                save_path='curriculum_unrolled_output.png'):
+    """
+    Visualize unrolled network output with multiple denoiser+ADMM iterations
+    
+    Shows the progression: Initial -> Iter1 -> Iter2 -> ... -> Final
+    """
+    denoiser.eval()
+    admm_layer.eval()
+    
+    # Get one sample
+    if dataset.has_ground_truth:
+        y_sample, x_gt_sample = dataset[20]
+    else:
+        y_sample = dataset[20]
+        x_gt_sample = None
+    
+    # Create matched filter input
+    A_batch = A_tensor.unsqueeze(0).to(device)
+    y_batch = y_sample.unsqueeze(0).to(device)
+    
+    # Run unrolled network
+    with torch.no_grad():
+        # Initial: matched filter output
+        x_current = complex_conj_transpose_matmul(A_batch, y_batch)
+        x_initial = x_current.clone()
+        
+        # Store outputs from each iteration
+        iteration_outputs = [x_initial]
+        
+        # Run through iterations
+        u = torch.zeros_like(y_batch)
+        for it in range(num_iterations):
+            # Denoiser
+            x_denoised = denoiser(x_current)
+            
+            # ADMM (uses original measurements!)
+            x_current, u = admm_layer(x_denoised, y_batch, u)
+            
+            iteration_outputs.append(x_current.clone())
+    
+    # Convert to numpy (magnitude)
+    outputs_np = []
+    for x_out in iteration_outputs:
+        x_np = torch.abs(torch.view_as_complex(
+            x_out[0].permute(1, 0).contiguous())).cpu().numpy()
+        outputs_np.append(x_np)
+    
+    if x_gt_sample is not None:
+        x_gt_np = torch.abs(torch.view_as_complex(
+            x_gt_sample.permute(1, 0).contiguous())).cpu().numpy()
+    else:
+        x_gt_np = None
+    
+    # Create angle axis
+    N_theta = outputs_np[0].shape[0]
+    theta = np.linspace(25.0, -25.0, N_theta)
+    
+    # Plot
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Left plot: Show progression of all iterations
+    ax = axes[0]
+    colors = plt.cm.viridis(np.linspace(0, 1, len(outputs_np)))
+    
+    for idx, (output, color) in enumerate(zip(outputs_np, colors)):
+        if idx == 0:
+            label = 'Initial (A^H @ y)'
+            alpha = 0.5
+            linestyle = '--'
+        else:
+            label = f'Iteration {idx}'
+            alpha = 0.7 + (idx / len(outputs_np)) * 0.3  # Progressively more opaque
+            linestyle = '-'
+        
+        ax.plot(theta, output, color=color, label=label, 
+               linewidth=2, alpha=alpha, linestyle=linestyle)
+    
+    if x_gt_np is not None:
+        ax.plot(theta, x_gt_np, 'r--', label='Ground Truth', 
+               linewidth=2.5, alpha=0.9)
+    
+    ax.set_xlabel('Angle (degrees)', fontsize=12)
+    ax.set_ylabel('Magnitude', fontsize=12)
+    ax.set_title(f'Unrolled Network Progression ({training_mode.upper()})', 
+                fontsize=13, fontweight='bold')
+    ax.legend(fontsize=9, loc='best', ncol=2)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim([25, -25])
+    
+    # Right plot: Compare initial vs final vs ground truth
+    ax = axes[1]
+    ax.plot(theta, outputs_np[0], 'r-', label='Initial (A^H @ y)', 
+           linewidth=2, alpha=0.7)
+    ax.plot(theta, outputs_np[-1], 'b-', label=f'Final (Iter {num_iterations})', 
+           linewidth=2.5)
+    if x_gt_np is not None:
+        ax.plot(theta, x_gt_np, 'g--', label='Ground Truth', 
+               linewidth=2.5, alpha=0.8)
+    
+    ax.set_xlabel('Angle (degrees)', fontsize=12)
+    ax.set_ylabel('Magnitude', fontsize=12)
+    ax.set_title('Initial vs Final Reconstruction', 
+                fontsize=13, fontweight='bold')
+    ax.legend(fontsize=11, loc='best')
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim([25, -25])
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"Unrolled network output saved to {save_path}")
+    plt.close()
+    
+    # Print metrics
+    if x_gt_np is not None:
+        mse_initial = np.mean((outputs_np[0] - x_gt_np) ** 2)
+        mse_final = np.mean((outputs_np[-1] - x_gt_np) ** 2)
+        improvement = 100.0 * (mse_initial - mse_final) / mse_initial
+        
+        print(f"  Initial MSE: {mse_initial:.6e}")
+        print(f"  Final MSE (Iter {num_iterations}): {mse_final:.6e}")
+        print(f"  Improvement: {improvement:.2f}%")
+
+
 def visualize_measurement_domain(denoiser, dataset, A_tensor, device,
                                  save_path='curriculum_measurement_domain.png'):
     """Visualize measurement domain consistency"""
@@ -406,7 +535,9 @@ def main():
     else:
         raise ValueError(f"Unknown DENOISER_TYPE: {DENOISER_TYPE}")
     
-    admm_layer = DCLayer_ADMM(A_tensor, N_admm_steps=NUM_ADMM_STEPS).to(DEVICE)
+    admm_layer = DCLayer_ADMM(A_tensor, N_admm_steps=NUM_ADMM_STEPS,
+                             enforce_real=ADMM_ENFORCE_REAL,
+                             enforce_positivity=ADMM_ENFORCE_POSITIVITY).to(DEVICE)
     
     # Freeze ADMM parameters
     for param in admm_layer.parameters():
@@ -546,6 +677,12 @@ def main():
     visualize_final_denoiser(denoiser, dataset, A_tensor, 
                              CURRICULUM_TRAINING_MODE, DEVICE,
                              save_path='curriculum_final_output.png')
+    
+    # Unrolled network output (multiple iterations)
+    visualize_unrolled_network(denoiser, admm_layer, dataset, A_tensor,
+                               CURRICULUM_TRAINING_MODE, DEVICE,
+                               num_iterations=NUM_CURRICULUM_STAGES,
+                               save_path='curriculum_unrolled_output.png')
     
     # Measurement domain
     visualize_measurement_domain(denoiser, dataset, A_tensor, DEVICE,
