@@ -71,7 +71,7 @@ MODEL_SAVE_PATH = 'checkpoints/denoiser_curriculum.pth'
 # Helper Functions
 # -----------------------------------------------------------------
 
-def generate_synthetic_data(denoiser, admm_layer, x_input_batch, A_batch, device):
+def generate_synthetic_data(denoiser, admm_layer, x_input_batch, y_batch, A_batch, device):
     """
     Generate synthetic data by passing through denoiser + ADMM
     
@@ -79,26 +79,32 @@ def generate_synthetic_data(denoiser, admm_layer, x_input_batch, A_batch, device
         denoiser: Trained denoiser model
         admm_layer: ADMM layer with fixed parameters
         x_input_batch: Input to denoiser [B, 2, N_theta]
+        y_batch: Original measurements for each sample [B, 2, M_rx]
         A_batch: Steering matrix [B, 2, M_rx, N_theta]
         device: torch device
     
     Returns:
         x_after_admm: Output after denoiser + ADMM [B, 2, N_theta]
+    
+    Note:
+        y_batch contains the ORIGINAL measurements for each sample.
+        ADMM enforces data consistency with these measurements, NOT synthetic ones.
+        This ensures proper data fidelity throughout all curriculum stages.
     """
     denoiser.eval()
     with torch.no_grad():
         x_input_batch = x_input_batch.to(device)
+        y_batch = y_batch.to(device)
         A_batch = A_batch.to(device)
         
         # Denoiser
         x_denoised = denoiser(x_input_batch)
         
-        # ADMM (need to compute y from x for ADMM input)
-        y_for_admm = complex_matmul(A_batch, x_input_batch)
-        u_init = torch.zeros_like(y_for_admm)
+        # ADMM uses ORIGINAL measurements (not synthetic!)
+        u_init = torch.zeros_like(y_batch)
         
-        # ADMM forward pass
-        x_after_admm, _ = admm_layer(x_denoised, y_for_admm, u_init)
+        # ADMM forward pass - enforces consistency with original y
+        x_after_admm, _ = admm_layer(x_denoised, y_batch, u_init)
     
     return x_after_admm
 
@@ -495,12 +501,15 @@ def main():
                 end_idx = min(start_idx + BATCH_SIZE, len(current_inputs))
                 
                 x_input_batch = current_inputs[start_idx:end_idx]
+                # Get corresponding ORIGINAL measurements for this batch
+                y_batch = accumulated_ys[0][start_idx:end_idx]
                 A_batch = A_batch_expanded.expand(x_input_batch.shape[0], -1, -1, -1)
                 
                 x_after_admm = generate_synthetic_data(
                     denoiser=denoiser,
                     admm_layer=admm_layer,
                     x_input_batch=x_input_batch,
+                    y_batch=y_batch,
                     A_batch=A_batch,
                     device=DEVICE
                 )
