@@ -6,6 +6,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import time
+from tqdm import tqdm
 
 # Add project root to path
 import sys
@@ -36,7 +37,7 @@ LEARNING_RATE = 1e-4
 
 # Model Hyperparameters
 NUM_UNROLLS = 5      # N1 in the paper: total unrolled iterations
-NUM_ADMM_STEPS = 1   # N2 in the paper: internal ADMM steps
+NUM_ADMM_STEPS = 2   # N2 in the paper: internal ADMM steps
 
 # *** NEW: Training Mode Configuration ***
 TRAINING_MODE = 'unsupervised'  # Options: 'supervised', 'unsupervised', 'hybrid'
@@ -172,7 +173,7 @@ def main():
     # -----------------------------------------------------------------
     # 5. Training Loop
     # -----------------------------------------------------------------
-    print(f"--- Starting Training for {NUM_EPOCHS} Epochs ---")
+    print(f"\n--- Starting Training for {NUM_EPOCHS} Epochs ---\n")
     
     model.train() # Set the model to training mode
     
@@ -183,12 +184,21 @@ def main():
     
     tic = time.time()
     
-    for epoch in range(NUM_EPOCHS):
+    # Create progress bar for epochs
+    epoch_pbar = tqdm(range(NUM_EPOCHS), desc="Training", unit="epoch", 
+                      dynamic_ncols=True, leave=True)
+    
+    for epoch in epoch_pbar:
         epoch_total_loss = 0.0
         epoch_sup_loss = 0.0
         epoch_unsup_loss = 0.0
         
-        for i, batch_data in enumerate(dataloader):
+        # Create progress bar for batches
+        batch_pbar = tqdm(enumerate(dataloader), total=len(dataloader),
+                         desc=f"Epoch {epoch+1}/{NUM_EPOCHS}", unit="batch",
+                         leave=False, dynamic_ncols=True)
+        
+        for i, batch_data in batch_pbar:
             # Unpack batch data
             if has_ground_truth:
                 y_batch, x_gt_batch = batch_data
@@ -243,15 +253,15 @@ def main():
             epoch_sup_loss += loss_supervised.item() if isinstance(loss_supervised, torch.Tensor) else 0.0
             epoch_unsup_loss += loss_unsupervised.item() if isinstance(loss_unsupervised, torch.Tensor) else 0.0
             
-            if (i + 1) % 50 == 0:
-                print(f"  Epoch [{epoch+1}/{NUM_EPOCHS}], Step [{i+1}/{len(dataloader)}], " + 
-                      f"Total Loss: {total_loss.item():.6f}")
-                if actual_training_mode in ['supervised', 'hybrid']:
-                    print(f"    Supervised (image): {loss_supervised.item():.6f}")
-                if actual_training_mode in ['unsupervised', 'hybrid']:
-                    print(f"    Unsupervised (measurement): {loss_unsupervised.item():.6f}")
+            # Update batch progress bar with current loss
+            postfix_dict = {'loss': f'{total_loss.item():.6f}'}
+            if actual_training_mode in ['supervised', 'hybrid']:
+                postfix_dict['sup'] = f'{loss_supervised.item():.6f}'
+            if actual_training_mode in ['unsupervised', 'hybrid']:
+                postfix_dict['unsup'] = f'{loss_unsupervised.item():.6f}'
+            batch_pbar.set_postfix(postfix_dict)
 
-        # Print average loss for the epoch
+        # Calculate average loss for the epoch
         avg_total_loss = epoch_total_loss / len(dataloader)
         avg_sup_loss = epoch_sup_loss / len(dataloader)
         avg_unsup_loss = epoch_unsup_loss / len(dataloader)
@@ -260,14 +270,27 @@ def main():
         epoch_supervised_losses.append(avg_sup_loss)
         epoch_unsupervised_losses.append(avg_unsup_loss)
         
-        print(f"*** Epoch {epoch+1} Complete. Average Total Loss: {avg_total_loss:.6f} ***")
+        # Update epoch progress bar with average losses
+        postfix_dict = {'avg_loss': f'{avg_total_loss:.6f}'}
         if actual_training_mode in ['supervised', 'hybrid']:
-            print(f"    Average Supervised Loss: {avg_sup_loss:.6f}")
+            postfix_dict['avg_sup'] = f'{avg_sup_loss:.6f}'
         if actual_training_mode in ['unsupervised', 'hybrid']:
-            print(f"    Average Unsupervised Loss: {avg_unsup_loss:.6f}")
+            postfix_dict['avg_unsup'] = f'{avg_unsup_loss:.6f}'
+        epoch_pbar.set_postfix(postfix_dict)
 
     toc = time.time()
-    print(f"Total Training time is: {toc-tic} seconds")
+    
+    # Print final training summary
+    print("\n" + "="*80)
+    print("TRAINING COMPLETE")
+    print("="*80)
+    print(f"Total Training Time: {toc-tic:.2f} seconds ({(toc-tic)/60:.2f} minutes)")
+    print(f"Final Average Loss: {avg_total_loss:.8f}")
+    if actual_training_mode in ['supervised', 'hybrid']:
+        print(f"  Supervised (Image Domain): {avg_sup_loss:.8f}")
+    if actual_training_mode in ['unsupervised', 'hybrid']:
+        print(f"  Unsupervised (Measurement Domain): {avg_unsup_loss:.8f}")
+    print("="*80 + "\n")
 
     # -----------------------------------------------------------------
     # 6. Plot Training Curves
@@ -400,9 +423,215 @@ def main():
     print("Progressive refinement visualizations complete!")
 
     # -----------------------------------------------------------------
-    # 9. Save the Trained Model
+    # 9. Quantitative Evaluation on Full Dataset
     # -----------------------------------------------------------------
-    print("--- Training Complete ---")
+    if has_ground_truth:
+        print("\n" + "="*80)
+        print("QUANTITATIVE EVALUATION ON FULL DATASET")
+        print("="*80)
+        
+        model.eval()
+        
+        # Create a DataLoader for evaluation (no shuffling, to preserve order)
+        eval_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, 
+                                num_workers=0, pin_memory=True)
+        
+        # Storage for errors
+        all_mse = []
+        all_nmse = []
+        all_mae = []  # Mean Absolute Error
+        
+        eval_start_time = time.time()
+        
+        with torch.no_grad():
+            # Create progress bar for evaluation
+            eval_pbar = tqdm(enumerate(eval_loader), total=len(eval_loader),
+                           desc="Evaluating", unit="batch", dynamic_ncols=True)
+            
+            for batch_idx, batch_data in eval_pbar:
+                # Unpack batch data (DataLoader returns tuple/list when dataset returns tuple)
+                try:
+                    if isinstance(batch_data, (tuple, list)) and len(batch_data) == 2:
+                        y_batch, x_gt_batch = batch_data
+                    else:
+                        # Single tensor returned (no ground truth)
+                        print(f"Warning: Batch {batch_idx} does not contain ground truth, skipping...")
+                        continue
+                except (ValueError, TypeError) as e:
+                    print(f"Warning: Error unpacking batch {batch_idx}: {e}, skipping...")
+                    continue
+                
+                y_batch = y_batch.to(device)
+                x_gt_batch = x_gt_batch.to(device)
+                
+                # Forward pass
+                x_hat_batch = model(y_batch)
+                
+                # Compute per-sample MSE (averaged over channels and spatial dimension)
+                # Shape: [batch, 2, N_theta] -> MSE per sample: [batch]
+                mse_per_sample = torch.mean((x_hat_batch - x_gt_batch)**2, dim=[1, 2])
+                
+                # Compute per-sample MAE
+                mae_per_sample = torch.mean(torch.abs(x_hat_batch - x_gt_batch), dim=[1, 2])
+                
+                # Compute per-sample NMSE (normalized by ground truth power)
+                x_gt_power = torch.mean(x_gt_batch**2, dim=[1, 2])
+                nmse_per_sample = mse_per_sample / (x_gt_power + 1e-10)
+                
+                all_mse.append(mse_per_sample.cpu())
+                all_nmse.append(nmse_per_sample.cpu())
+                all_mae.append(mae_per_sample.cpu())
+                
+                # Update progress bar
+                eval_pbar.set_postfix({'MSE': f'{mse_per_sample.mean().item():.6f}'})
+        
+        eval_time = time.time() - eval_start_time
+        print(f"Evaluation completed in {eval_time:.2f} seconds\n")
+        
+        # Check if we have any data
+        if len(all_mse) == 0:
+            print("\n" + "="*80)
+            print("ERROR: No samples were evaluated!")
+            print("This likely means ground truth data is not being returned properly.")
+            print("Check that the dataset has ground truth and __getitem__ returns (y, x_gt)")
+            print("="*80)
+            print("\nSkipping quantitative evaluation...")
+        else:
+            # Concatenate all batches
+            all_mse = torch.cat(all_mse)
+            all_nmse = torch.cat(all_nmse)
+            all_mae = torch.cat(all_mae)
+            
+            # Compute statistics
+            print(f"\n{'='*80}")
+            print(f"DATASET STATISTICS ({len(all_mse)} samples evaluated):")
+            print(f"{'='*80}")
+            print(f"\nMean Squared Error (MSE):")
+            print(f"  Mean:   {all_mse.mean():.8f}")
+            print(f"  Std:    {all_mse.std():.8f}")
+            print(f"  Median: {all_mse.median():.8f}")
+            print(f"  Min:    {all_mse.min():.8f}")
+            print(f"  Max:    {all_mse.max():.8f}")
+            
+            print(f"\nNormalized MSE (NMSE):")
+            print(f"  Mean:   {all_nmse.mean():.8f}")
+            print(f"  Std:    {all_nmse.std():.8f}")
+            print(f"  Median: {all_nmse.median():.8f}")
+            print(f"  Min:    {all_nmse.min():.8f}")
+            print(f"  Max:    {all_nmse.max():.8f}")
+            
+            print(f"\nMean Absolute Error (MAE):")
+            print(f"  Mean:   {all_mae.mean():.8f}")
+            print(f"  Std:    {all_mae.std():.8f}")
+            print(f"  Median: {all_mae.median():.8f}")
+            print(f"  Min:    {all_mae.min():.8f}")
+            print(f"  Max:    {all_mae.max():.8f}")
+            
+            # Find best and worst samples
+            best_idx = all_mse.argmin().item()
+            worst_idx = all_mse.argmax().item()
+            print(f"\nBest sample:  #{best_idx} (MSE = {all_mse[best_idx]:.8f})")
+            print(f"Worst sample: #{worst_idx} (MSE = {all_mse[worst_idx]:.8f})")
+            print(f"{'='*80}\n")
+            
+            # Save results to file
+            import pickle
+            eval_results = {
+                'mse_per_sample': all_mse.numpy(),
+                'nmse_per_sample': all_nmse.numpy(),
+                'mae_per_sample': all_mae.numpy(),
+                'mse_mean': all_mse.mean().item(),
+                'mse_std': all_mse.std().item(),
+                'mse_median': all_mse.median().item(),
+                'nmse_mean': all_nmse.mean().item(),
+                'nmse_std': all_nmse.std().item(),
+                'mae_mean': all_mae.mean().item(),
+                'num_samples': len(all_mse),
+                'best_sample_idx': best_idx,
+                'worst_sample_idx': worst_idx,
+                'training_mode': TRAINING_MODE,
+                'denoiser_type': DENOISER_TYPE,
+                'num_unrolls': NUM_UNROLLS,
+                'num_admm_steps': NUM_ADMM_STEPS,
+            }
+            
+            results_file = 'evaluation_results.pkl'
+            with open(results_file, 'wb') as f:
+                pickle.dump(eval_results, f)
+            print(f"Evaluation results saved to '{results_file}'")
+            
+            # Generate error distribution plots
+            print("Generating error distribution plots...")
+            fig = plt.figure(figsize=(15, 5))
+            
+            # MSE histogram
+            ax1 = plt.subplot(1, 3, 1)
+            ax1.hist(all_mse.numpy(), bins=50, alpha=0.7, color='blue', edgecolor='black')
+            ax1.axvline(all_mse.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean={all_mse.mean():.6f}')
+            ax1.axvline(all_mse.median(), color='green', linestyle='--', linewidth=2, label=f'Median={all_mse.median():.6f}')
+            ax1.set_xlabel('MSE', fontsize=11)
+            ax1.set_ylabel('Number of Samples', fontsize=11)
+            ax1.set_title('MSE Distribution', fontsize=12, fontweight='bold')
+            ax1.legend(fontsize=9)
+            ax1.grid(True, alpha=0.3)
+            
+            # NMSE histogram
+            ax2 = plt.subplot(1, 3, 2)
+            ax2.hist(all_nmse.numpy(), bins=50, alpha=0.7, color='green', edgecolor='black')
+            ax2.axvline(all_nmse.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean={all_nmse.mean():.6f}')
+            ax2.axvline(all_nmse.median(), color='orange', linestyle='--', linewidth=2, label=f'Median={all_nmse.median():.6f}')
+            ax2.set_xlabel('NMSE', fontsize=11)
+            ax2.set_ylabel('Number of Samples', fontsize=11)
+            ax2.set_title('Normalized MSE Distribution', fontsize=12, fontweight='bold')
+            ax2.legend(fontsize=9)
+            ax2.grid(True, alpha=0.3)
+            
+            # MAE histogram
+            ax3 = plt.subplot(1, 3, 3)
+            ax3.hist(all_mae.numpy(), bins=50, alpha=0.7, color='purple', edgecolor='black')
+            ax3.axvline(all_mae.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean={all_mae.mean():.6f}')
+            ax3.axvline(all_mae.median(), color='orange', linestyle='--', linewidth=2, label=f'Median={all_mae.median():.6f}')
+            ax3.set_xlabel('MAE', fontsize=11)
+            ax3.set_ylabel('Number of Samples', fontsize=11)
+            ax3.set_title('MAE Distribution', fontsize=12, fontweight='bold')
+            ax3.legend(fontsize=9)
+            ax3.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            error_plot_path = 'train_error_distribution.png'
+            plt.savefig(error_plot_path, dpi=150, bbox_inches='tight')
+            print(f"Error distribution plot saved to '{error_plot_path}'")
+            plt.close()
+            
+            # Generate per-sample error plot (line plot showing error across all samples)
+            print("Generating per-sample error plot...")
+            fig, ax = plt.subplots(figsize=(14, 6))
+            sample_indices = np.arange(len(all_mse))
+            ax.plot(sample_indices, all_mse.numpy(), 'b-', linewidth=1, alpha=0.6, label='MSE per sample')
+            ax.axhline(all_mse.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean MSE = {all_mse.mean():.6f}')
+            ax.scatter([best_idx], [all_mse[best_idx]], color='green', s=100, zorder=5, label=f'Best (#{best_idx})')
+            ax.scatter([worst_idx], [all_mse[worst_idx]], color='red', s=100, zorder=5, label=f'Worst (#{worst_idx})')
+            ax.set_xlabel('Sample Index', fontsize=12)
+            ax.set_ylabel('MSE', fontsize=12)
+            ax.set_title(f'Per-Sample MSE Across Dataset ({len(all_mse)} samples)', fontsize=13, fontweight='bold')
+            ax.legend(fontsize=10)
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            per_sample_plot_path = 'train_per_sample_errors.png'
+            plt.savefig(per_sample_plot_path, dpi=150, bbox_inches='tight')
+            print(f"Per-sample error plot saved to '{per_sample_plot_path}'")
+            plt.close()
+            
+            print("\nQuantitative evaluation complete!")
+    else:
+        print("\n" + "="*80)
+        print("Quantitative evaluation skipped (no ground truth available)")
+        print("="*80)
+
+    # -----------------------------------------------------------------
+    # 10. Save the Trained Model
+    # -----------------------------------------------------------------
+    print("\n--- Training Complete ---")
     torch.save(model.state_dict(), MODEL_SAVE_PATH)
     print(f"Trained model saved to: {MODEL_SAVE_PATH}")
 

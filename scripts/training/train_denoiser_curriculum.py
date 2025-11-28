@@ -44,12 +44,12 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MAT_FILE_PATH = 'data/FL_MIMO_SAR_data.mat'
 
 # Curriculum Training Configuration
-NUM_CURRICULUM_STAGES = 3  # Train for 3 iteration depths (0, 1, 2)
+NUM_CURRICULUM_STAGES = 5  # Train for 3 iteration depths (0, 1, 2)
 CURRICULUM_TRAINING_MODE = 'unsupervised'  # 'supervised' or 'unsupervised'
 CURRICULUM_RETRAINING_STRATEGY = 'fine_tune'  # 'from_scratch' or 'fine_tune'
 
 # Training Hyperparameters
-EPOCHS_PER_STAGE = 1000  # Epochs for each curriculum stage
+EPOCHS_PER_STAGE = 500  # Epochs for each curriculum stage
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 
@@ -57,16 +57,16 @@ LEARNING_RATE = 1e-3
 NUM_ADMM_STEPS = 2  # Fixed ADMM steps per iteration
 
 # Denoiser Architecture Selection
-DENOISER_TYPE = 'complex'  # Options: 'real' (best for real targets, ~62K params)
+DENOISER_TYPE = 'real'  # Options: 'real' (best for real targets, ~62K params)
                         #          'complex' (allows imaginary, ~62K params)
                         #          'original' (shallow residual, ~3.6K params)
 
 # Positivity Enforcement
-ENFORCE_POSITIVITY = False  # True: Add ReLU to enforce output ≥ 0 (only for DENOISER_TYPE='real')
+ENFORCE_POSITIVITY = True  # True: Add ReLU to enforce output ≥ 0 (only for DENOISER_TYPE='real')
 
 # ADMM Physical Constraints (for synthetic data generation)
-ADMM_ENFORCE_REAL = False        # True: Project ADMM x-update to real values (discard imaginary)
-ADMM_ENFORCE_POSITIVITY = False  # True: Clamp ADMM x-update to non-negative values
+ADMM_ENFORCE_REAL = True        # True: Project ADMM x-update to real values (discard imaginary)
+ADMM_ENFORCE_POSITIVITY = True  # True: Clamp ADMM x-update to non-negative values
 
 # Output
 MODEL_SAVE_PATH = 'checkpoints/denoiser_curriculum.pth'

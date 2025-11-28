@@ -206,7 +206,7 @@ class DCLayer_ADMM(nn.Module):
         
         # Learnable parameters
         self.log_rho = nn.Parameter(torch.log(torch.tensor(1.0)))
-        self.log_epsilon = nn.Parameter(torch.log(torch.tensor(0.01)))
+        self.log_epsilon = nn.Parameter(torch.log(torch.tensor(0.1)))
         
         # Store A (shape [2, N_v, N_theta])
         self.register_buffer('A', A_tensor)
@@ -300,15 +300,22 @@ class DCLayer_ADMM(nn.Module):
             x = b - A_H_T                                           # [B, 2, N]
 
             # -----------------------------------------------
-            # ENFORCE PHYSICAL CONSTRAINTS
+            # ENFORCE PHYSICAL CONSTRAINTS (non-in-place for autograd)
             # -----------------------------------------------
-            # 1. Enforce realness: discard imaginary part
-            if self.enforce_real:
-                x[:, 1, :] = 0  # Set imaginary channel to zero
-            
-            # 2. Enforce positivity: clamp to non-negative
-            if self.enforce_positivity:
-                x[:, 0, :] = torch.clamp(x[:, 0, :], min=0)
+            if self.enforce_real or self.enforce_positivity:
+                x_real = x[:, 0, :]  # Extract real part
+                x_imag = x[:, 1, :]  # Extract imaginary part
+                
+                # Apply positivity constraint (clamp real part to non-negative)
+                if self.enforce_positivity:
+                    x_real = torch.clamp(x_real, min=0)
+                
+                # Apply realness constraint (zero out imaginary part)
+                if self.enforce_real:
+                    x_imag = torch.zeros_like(x_imag)
+                
+                # Reconstruct x (creates new tensor, preserves gradient flow)
+                x = torch.stack([x_real, x_imag], dim=1)
 
             
             # -----------------------------------------------

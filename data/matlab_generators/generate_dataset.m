@@ -42,7 +42,7 @@ target_width_bins = 1; % Set to 1 for sparse, 3 or 5 for wider targets
 num_training_samples = angle_steps; % Generate one sample for each angle
 half_width = floor(target_width_bins / 2);
 
-noise_std = 1e-3; % Standard deviation of the complex noise
+noise_std = 1e-20; % Standard deviation of the complex noise
 fprintf('Generating %d training samples with target width %d...\n', num_training_samples, target_width_bins);
 
 % --- Initialize Dataset Matrices ---
@@ -85,3 +85,32 @@ received_signals_fft = y_dataset;
 % Use -v7.3 flag to handle large dataset files
 save('../FL_MIMO_SAR_data.mat', 'A', 'received_signals_fft', 'x', 'noise_std', '-v7.3');
 fprintf('Data saved to FL_MIMO_SAR_data.mat\n');
+
+%% Save object for image reconstruction
+x_domain_length = 4.125;
+y_domain_length = 4.125;
+dx = range_resolution;
+dy = range_resolution;
+x = (dx/2):dx:(x_domain_length-dx/2);
+y = (y_domain_length/2-dy/2):-dy:(-y_domain_length/2+dy/2);
+[x_grid,y_grid] = meshgrid(x,y);
+
+
+ranges = linspace(5, 9.3552, 51);
+ranges = ranges(:);
+angles = theta(:);
+angles = flipud(angles);
+x_radar = -5;
+y_radar = 0;
+save('../data.mat', 'A', 'received_signals_fft', 'x', 'angles', 'ranges', 'x_grid', 'y_grid', 'x_radar', 'y_radar', '-v7.3');
+
+
+
+dx = x_grid - x_radar;
+dy = y_grid - y_radar;
+
+r = sqrt(dx.^2 + dy.^2);
+theta_deg = atan2(dy, dx) * 180/pi ;
+
+
+

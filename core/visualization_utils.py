@@ -30,21 +30,21 @@ def plot_unrolled_iterations(intermediates, x_gt=None, sample_idx=0, save_path='
     N_theta = x_init.shape[1]
     
     # Convert to numpy and get magnitude
-    x_init_np = torch.abs(torch.view_as_complex(x_init.permute(1, 0).contiguous())).cpu().numpy()
-    x_denoiser_np = [torch.abs(torch.view_as_complex(x.permute(1, 0).contiguous())).cpu().numpy() 
+    x_init_np = torch.real(torch.view_as_complex(x_init.permute(1, 0).contiguous())).cpu().numpy()
+    x_denoiser_np = [torch.real(torch.view_as_complex(x.permute(1, 0).contiguous())).cpu().numpy() 
                      for x in x_after_denoiser]
-    x_admm_np = [torch.abs(torch.view_as_complex(x.permute(1, 0).contiguous())).cpu().numpy() 
+    x_admm_np = [torch.real(torch.view_as_complex(x.permute(1, 0).contiguous())).cpu().numpy() 
                  for x in x_after_admm]
-    x_final_np = torch.abs(torch.view_as_complex(x_final.permute(1, 0).contiguous())).cpu().numpy()
+    x_final_np = torch.real(torch.view_as_complex(x_final.permute(1, 0).contiguous())).cpu().numpy()
     
     if x_gt is not None:
         x_gt_sample = x_gt[sample_idx]
-        x_gt_np = torch.abs(torch.view_as_complex(x_gt_sample.permute(1, 0).contiguous())).cpu().numpy()
+        x_gt_np = torch.real(torch.view_as_complex(x_gt_sample.permute(1, 0).contiguous())).cpu().numpy()
     else:
         x_gt_np = None
     
     # Create angle axis
-    theta = np.linspace(25.0, -25.0, N_theta)
+    theta = np.linspace(-25.0, 25.0, N_theta)
     
     # Create figure with subplots
     # Layout: 1 row for initialization, then num_iterations rows (each with denoiser and ADMM)
@@ -63,11 +63,10 @@ def plot_unrolled_iterations(intermediates, x_gt=None, sample_idx=0, save_path='
         ax0.plot(theta, x_gt_np / vmax, 'r-', label='Ground Truth', linewidth=2, alpha=0.7)
     ax0.plot(theta, x_init_np / vmax, 'b-', label='Initial (A^H @ y)', linewidth=2)
     ax0.set_title('Initialization: Matched Filter Output', fontsize=12, fontweight='bold')
-    ax0.set_xlabel('Angle (degrees)')
-    ax0.set_ylabel('Normalized Magnitude')
+    ax0.set_ylabel('Normalized Real Part')
     ax0.legend()
     ax0.grid(True, alpha=0.3)
-    ax0.set_xlim([25, -25])
+    ax0.set_xlim([-25, 25])
     
     # Rows 1 to num_iterations: Show denoiser and ADMM outputs
     for i in range(num_iterations):
@@ -79,11 +78,12 @@ def plot_unrolled_iterations(intermediates, x_gt=None, sample_idx=0, save_path='
         ax_den.plot(theta, x_denoiser_np[i] / vmax, 'g-', 
                    label=f'After Denoiser {i+1}', linewidth=2)
         ax_den.set_title(f'Iteration {i+1}: After CNN Denoiser', fontsize=11, fontweight='bold')
-        ax_den.set_xlabel('Angle (degrees)')
-        ax_den.set_ylabel('Normalized Magnitude')
+        ax_den.set_ylabel('Normalized Real Part')
         ax_den.legend(fontsize=9)
         ax_den.grid(True, alpha=0.3)
-        ax_den.set_xlim([25, -25])
+        ax_den.set_xlim([-25, 25])
+        if i == num_iterations - 1:  # Add xlabel to last row
+            ax_den.set_xlabel('Angle (degrees)')
         
         # Right column: After ADMM
         ax_admm = fig.add_subplot(gs[i+1, 1])
@@ -93,14 +93,15 @@ def plot_unrolled_iterations(intermediates, x_gt=None, sample_idx=0, save_path='
         ax_admm.plot(theta, x_admm_np[i] / vmax, 'b-', 
                     label=f'After ADMM {i+1}', linewidth=2)
         ax_admm.set_title(f'Iteration {i+1}: After ADMM (Data Consistency)', fontsize=11, fontweight='bold')
-        ax_admm.set_xlabel('Angle (degrees)')
-        ax_admm.set_ylabel('Normalized Magnitude')
+        ax_admm.set_ylabel('Normalized Real Part')
         ax_admm.legend(fontsize=9)
         ax_admm.grid(True, alpha=0.3)
-        ax_admm.set_xlim([25, -25])
+        ax_admm.set_xlim([-25, 25])
+        if i == num_iterations - 1:  # Add xlabel to last row
+            ax_admm.set_xlabel('Angle (degrees)')
     
-    plt.suptitle(f'Progressive Refinement Through Unrolled Iterations (Sample {sample_idx})', 
-                 fontsize=14, fontweight='bold', y=0.995)
+    #plt.suptitle(f'Progressive Refinement Through Unrolled Iterations (Sample {sample_idx})', 
+    #             fontsize=14, fontweight='bold', y=0.995)
     
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     print(f"Unrolled iterations plot saved to {save_path}")
@@ -126,18 +127,18 @@ def plot_iteration_comparison(intermediates, x_gt=None, sample_idx=0, save_path=
     N_theta = x_init.shape[1]
     
     # Convert to numpy and get magnitude
-    x_init_np = torch.abs(torch.view_as_complex(x_init.permute(1, 0).contiguous())).cpu().numpy()
-    x_admm_np = [torch.abs(torch.view_as_complex(x.permute(1, 0).contiguous())).cpu().numpy() 
+    x_init_np = torch.real(torch.view_as_complex(x_init.permute(1, 0).contiguous())).cpu().numpy()
+    x_admm_np = [torch.real(torch.view_as_complex(x.permute(1, 0).contiguous())).cpu().numpy() 
                  for x in x_after_admm]
     
     if x_gt is not None:
         x_gt_sample = x_gt[sample_idx]
-        x_gt_np = torch.abs(torch.view_as_complex(x_gt_sample.permute(1, 0).contiguous())).cpu().numpy()
+        x_gt_np = torch.real(torch.view_as_complex(x_gt_sample.permute(1, 0).contiguous())).cpu().numpy()
     else:
         x_gt_np = None
     
     # Create angle axis
-    theta = np.linspace(25.0, -25.0, N_theta)
+    theta = np.linspace(-25.0, 25.0, N_theta)
     
     # Create figure
     fig, ax = plt.subplots(figsize=(14, 8))
@@ -164,10 +165,10 @@ def plot_iteration_comparison(intermediates, x_gt=None, sample_idx=0, save_path=
     
     ax.set_title(f'Comparison of All Iterations (Sample {sample_idx})', fontsize=14, fontweight='bold')
     ax.set_xlabel('Angle (degrees)', fontsize=12)
-    ax.set_ylabel('Normalized Magnitude', fontsize=12)
+    ax.set_ylabel('Normalized Real Part', fontsize=12)
     ax.legend(fontsize=10, loc='best')
     ax.grid(True, alpha=0.3)
-    ax.set_xlim([25, -25])
+    ax.set_xlim([-25, 25])
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -204,9 +205,9 @@ def plot_measurement_domain_progression(intermediates, y_gt, A_tensor, sample_id
     y_after_admm = [complex_matmul(A_batch, x)[0] for x in x_after_admm]
     
     # Convert to numpy and get magnitude
-    y_gt_np = torch.abs(torch.view_as_complex(y_gt_sample.permute(1, 0).contiguous())).cpu().numpy()
-    y_init_np = torch.abs(torch.view_as_complex(y_init.permute(1, 0).contiguous())).cpu().numpy()
-    y_admm_np = [torch.abs(torch.view_as_complex(y.permute(1, 0).contiguous())).cpu().numpy() 
+    y_gt_np = torch.real(torch.view_as_complex(y_gt_sample.permute(1, 0).contiguous())).cpu().numpy()
+    y_init_np = torch.real(torch.view_as_complex(y_init.permute(1, 0).contiguous())).cpu().numpy()
+    y_admm_np = [torch.real(torch.view_as_complex(y.permute(1, 0).contiguous())).cpu().numpy() 
                  for y in y_after_admm]
     
     # Also get real and imaginary parts for detailed view
@@ -225,13 +226,13 @@ def plot_measurement_domain_progression(intermediates, y_gt, A_tensor, sample_id
     gs = GridSpec(num_iterations + 1, 3, figure=fig, hspace=0.3, wspace=0.3)
     
     # Row 0: Initialization
-    # Magnitude
+    # Real Part
     ax0_mag = fig.add_subplot(gs[0, 0])
     ax0_mag.plot(antenna_idx, y_gt_np, 'r-o', label='Measured y', linewidth=2, markersize=8)
     ax0_mag.plot(antenna_idx, y_init_np, 'b-s', label='y_init = A*x_init', linewidth=2, markersize=6, alpha=0.7)
-    ax0_mag.set_title('Initialization: Magnitude', fontsize=11, fontweight='bold')
+    ax0_mag.set_title('Initialization: Real Part', fontsize=11, fontweight='bold')
     ax0_mag.set_xlabel('Virtual Antenna Index')
-    ax0_mag.set_ylabel('Magnitude')
+    ax0_mag.set_ylabel('Real Part')
     ax0_mag.legend(fontsize=9)
     ax0_mag.grid(True, alpha=0.3)
     
@@ -257,13 +258,13 @@ def plot_measurement_domain_progression(intermediates, y_gt, A_tensor, sample_id
     
     # Rows 1 to num_iterations: Show measurement domain after each ADMM
     for i in range(num_iterations):
-        # Magnitude
+        # Real Part
         ax_mag = fig.add_subplot(gs[i+1, 0])
         ax_mag.plot(antenna_idx, y_gt_np, 'r-o', label='Measured y', linewidth=2, markersize=8)
         ax_mag.plot(antenna_idx, y_admm_np[i], 'b-s', label=f'A*x_{i+1}', linewidth=2, markersize=6, alpha=0.7)
-        ax_mag.set_title(f'Iteration {i+1}: Magnitude', fontsize=11, fontweight='bold')
+        ax_mag.set_title(f'Iteration {i+1}: Real Part', fontsize=11, fontweight='bold')
         ax_mag.set_xlabel('Virtual Antenna Index')
-        ax_mag.set_ylabel('Magnitude')
+        ax_mag.set_ylabel('Real Part')
         ax_mag.legend(fontsize=9)
         ax_mag.grid(True, alpha=0.3)
         
@@ -287,8 +288,8 @@ def plot_measurement_domain_progression(intermediates, y_gt, A_tensor, sample_id
         ax_imag.legend(fontsize=9)
         ax_imag.grid(True, alpha=0.3)
     
-    plt.suptitle(f'Measurement Domain Progression (y = A*x) - Sample {sample_idx}', 
-                 fontsize=14, fontweight='bold', y=0.995)
+    #plt.suptitle(f'Measurement Domain Progression (y = A*x) - Sample {sample_idx}', 
+    #             fontsize=14, fontweight='bold', y=0.995)
     
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     print(f"Measurement domain progression plot saved to {save_path}")
