@@ -30,7 +30,7 @@ sys.path.insert(0, project_root)
 from time import time
 
 from core.models import CNNDenoiser, CNNDenoiser_RealOutput, CNNDenoiser_ComplexOutput, DCLayer_ADMM
-from core.data_loader import MIMOSAR_Dataset
+from core.data_loader import MIMOSAR_Dataset, load_dataset_auto
 from core.utils import complex_matmul, complex_conj_transpose_matmul
 
 # -----------------------------------------------------------------
@@ -41,7 +41,8 @@ from core.utils import complex_matmul, complex_conj_transpose_matmul
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Data
-MAT_FILE_PATH = 'data/FL_MIMO_SAR_data.mat'
+#MAT_FILE_PATH = 'data/FL_MIMO_SAR_data.mat'
+MAT_FILE_PATH = 'data/data_training_sar.mat'
 
 # Curriculum Training Configuration
 NUM_CURRICULUM_STAGES = 5  # Train for 3 iteration depths (0, 1, 2)
@@ -484,7 +485,8 @@ def main():
     # Determine if we need ground truth
     need_ground_truth = (CURRICULUM_TRAINING_MODE == 'supervised')
     
-    dataset = MIMOSAR_Dataset(MAT_FILE_PATH, return_ground_truth=need_ground_truth)
+    # Auto-detect single-position vs multi-position data
+    dataset = load_dataset_auto(MAT_FILE_PATH, return_ground_truth=need_ground_truth)
     A_tensor = dataset.A.to(DEVICE)
     
     print(f"  Original dataset size: {len(dataset)} samples")

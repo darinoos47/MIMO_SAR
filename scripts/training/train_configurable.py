@@ -15,7 +15,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, project_root)
 
 
-from core.data_loader import MIMOSAR_Dataset
+from core.data_loader import MIMOSAR_Dataset, load_dataset_auto
 from core.models import DBPNet
 from core.utils import complex_matmul
 from core.visualization_utils import (plot_unrolled_iterations, 
@@ -27,11 +27,12 @@ from core.real_prior import enforce_real_prior, measure_imaginary_magnitude
 # -----------------------------------------------------------------
 # 1. Configuration
 # -----------------------------------------------------------------
-MAT_FILE = 'data/FL_MIMO_SAR_data.mat'
+#MAT_FILE = 'data/FL_MIMO_SAR_data.mat'
+MAT_FILE = 'data/data_training_sar.mat'
 MODEL_SAVE_PATH = 'checkpoints/dbp_model.pth'
 
 # Training Hyperparameters
-NUM_EPOCHS = 500
+NUM_EPOCHS = 50
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-4
 
@@ -91,7 +92,8 @@ def main():
     # Determine if we need ground truth
     need_ground_truth = (TRAINING_MODE in ['supervised', 'hybrid'])
     
-    dataset = MIMOSAR_Dataset(MAT_FILE, return_ground_truth=need_ground_truth)
+    # Auto-detect single-position vs multi-position data
+    dataset = load_dataset_auto(MAT_FILE, return_ground_truth=need_ground_truth)
     
     # Check if ground truth is actually available
     has_ground_truth = dataset.has_ground_truth

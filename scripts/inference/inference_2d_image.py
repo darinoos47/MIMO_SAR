@@ -47,6 +47,7 @@ ADMM_ENFORCE_POSITIVITY = True
 BATCH_SIZE = 64  # Number of range bins to process at once
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 CONVERT_TO_CARTESIAN = True  # If True, also convert to Cartesian coordinates
+COMPARE_WITH_GT = True  # If True and GT available, generate comparison plots
 
 # Visualization configuration
 COLORMAP = 'hot'  # 'hot', 'jet', 'viridis', 'gray'
@@ -158,6 +159,38 @@ def main():
     print(f"  Output range: [{reconstructed_image.min():.6f}, {reconstructed_image.max():.6f}]\n")
     
     # -----------------------------------------------------------------
+    # 3b. Load Ground Truth (if available)
+    # -----------------------------------------------------------------
+    x_gt_polar = None
+    x_gt_cartesian = None
+    has_ground_truth = False
+    
+    if 'x' in data:
+        print("="*80)
+        print("GROUND TRUTH DETECTED")
+        print("="*80)
+        x_gt_polar = data['x'].astype(np.float64)
+        
+        # Handle different possible shapes
+        if x_gt_polar.ndim == 1:
+            # Single sample, replicate
+            x_gt_polar = np.tile(x_gt_polar, (N_ranges, 1))
+        elif x_gt_polar.ndim == 2:
+            # Check if transpose is needed
+            if x_gt_polar.shape[0] == N_ranges and x_gt_polar.shape[1] == N_theta:
+                pass  # Already correct
+            elif x_gt_polar.shape[0] == N_theta and x_gt_polar.shape[1] == N_ranges:
+                x_gt_polar = x_gt_polar.T  # Transpose
+            else:
+                print(f"WARNING: GT shape {x_gt_polar.shape} doesn't match expected [{N_ranges}, {N_theta}]")
+        
+        has_ground_truth = True
+        print(f"Ground truth loaded: {x_gt_polar.shape}")
+        print(f"  GT range: [{x_gt_polar.min():.6f}, {x_gt_polar.max():.6f}]\n")
+    else:
+        print("No ground truth ('x') found in data file.\n")
+    
+    # -----------------------------------------------------------------
     # 4. Convert to Cartesian Coordinates (Optional)
     # -----------------------------------------------------------------
     cartesian_image = None
@@ -201,6 +234,17 @@ def main():
                 print(f"  Cartesian image shape: {cartesian_image.shape}")
                 print(f"  Value range: [{cartesian_image.min():.6f}, {cartesian_image.max():.6f}]\n")
                 
+                # Convert ground truth to Cartesian if available
+                if has_ground_truth:
+                    print("Converting ground truth to Cartesian...")
+                    x_gt_cartesian = polar_to_cartesian(
+                        x_gt_polar, ranges, angles,
+                        x_grid, y_grid, x_radar, y_radar,
+                        method='cubic', verbose=False
+                    )
+                    print(f"  GT Cartesian shape: {x_gt_cartesian.shape}")
+                    print(f"  GT Cartesian range: [{x_gt_cartesian.min():.6f}, {x_gt_cartesian.max():.6f}]\n")
+                
             except Exception as e:
                 print(f"ERROR during Cartesian conversion: {e}")
                 print("Continuing without Cartesian image...\n")
@@ -221,6 +265,12 @@ def main():
     }
     if cartesian_image is not None:
         results_mat['cartesian_image'] = cartesian_image
+    if has_ground_truth:
+        results_mat['x_ground_truth_polar'] = x_gt_polar
+        results_mat['error_polar'] = np.abs(x_gt_polar - reconstructed_image)
+        if x_gt_cartesian is not None:
+            results_mat['x_ground_truth_cartesian'] = x_gt_cartesian
+            results_mat['error_cartesian'] = np.abs(x_gt_cartesian - cartesian_image)
     
     mat_file_path = os.path.join(OUTPUT_DIR, 'reconstructed_image.mat')
     scipy.io.savemat(mat_file_path, results_mat)
@@ -233,6 +283,12 @@ def main():
     }
     if cartesian_image is not None:
         npz_data['cartesian_image'] = cartesian_image
+    if has_ground_truth:
+        npz_data['x_ground_truth_polar'] = x_gt_polar
+        npz_data['error_polar'] = np.abs(x_gt_polar - reconstructed_image)
+        if x_gt_cartesian is not None:
+            npz_data['x_ground_truth_cartesian'] = x_gt_cartesian
+            npz_data['error_cartesian'] = np.abs(x_gt_cartesian - cartesian_image)
     
     npz_file_path = os.path.join(OUTPUT_DIR, 'reconstructed_image.npz')
     np.savez(npz_file_path, **npz_data)
@@ -387,6 +443,145 @@ def main():
         plt.savefig(comparison_cart_path, dpi=DPI, bbox_inches='tight')
         print(f"  Polar vs Cartesian comparison saved to: {comparison_cart_path}")
         plt.close()
+    
+    # -----------------------------------------------------------------
+    # 5b. Ground Truth Comparison (if available)
+    # -----------------------------------------------------------------
+    if COMPARE_WITH_GT and has_ground_truth:
+        print("\n" + "="*80)
+        print("GROUND TRUTH COMPARISON")
+        print("="*80)
+        
+        # Compute network input (matched filter output: A^H @ y)
+        print("Computing network input (matched filter output: A^H @ y)...")
+        # We need to apply A^H to the measurements
+        A_batch = A_tensor.unsqueeze(0).to(DEVICE)
+        
+        # Process measurements to get matched filter output
+        from core.utils import complex_conj_transpose_matmul
+        measurements_tensor = torch.from_numpy(
+            np.stack((measurements.real, measurements.imag), axis=1)
+        ).to(DEVICE)  # [N_ranges, 2, N_v]
+        
+        with torch.no_grad():
+            network_input = complex_conj_transpose_matmul(A_batch, measurements_tensor)  # [N_ranges, 2, N_theta]
+        
+        network_input_polar = network_input[:, 0, :].cpu().numpy()  # Extract real part [N_ranges, N_theta]
+        print(f"  Network input shape: {network_input_polar.shape}")
+        print(f"  Network input range: [{network_input_polar.min():.6f}, {network_input_polar.max():.6f}]\n")
+        
+        # --- Figure 1: Polar Domain Comparison (1x3 grid) ---
+        print("Generating polar domain comparison...")
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        # Network input (A^H @ y)
+        im1 = axes[0].imshow(network_input_polar, aspect='auto', cmap=COLORMAP,
+                            interpolation='nearest', origin='upper',
+                            extent=[angle_axis[0], angle_axis[-1], N_ranges-1, 0])
+        axes[0].set_xlabel('Angle (degrees)', fontsize=11)
+        axes[0].set_ylabel('Range Bin', fontsize=11)
+        axes[0].set_title('Network Input (A^H @ y)\nMatched Filter', fontsize=12, fontweight='bold')
+        plt.colorbar(im1, ax=axes[0])
+        
+        # Ground truth
+        im2 = axes[1].imshow(x_gt_polar, aspect='auto', cmap=COLORMAP,
+                            interpolation='nearest', origin='upper',
+                            extent=[angle_axis[0], angle_axis[-1], N_ranges-1, 0])
+        axes[1].set_xlabel('Angle (degrees)', fontsize=11)
+        axes[1].set_ylabel('Range Bin', fontsize=11)
+        axes[1].set_title('Ground Truth', fontsize=12, fontweight='bold')
+        plt.colorbar(im2, ax=axes[1])
+        
+        # Network output
+        im3 = axes[2].imshow(reconstructed_image, aspect='auto', cmap=COLORMAP,
+                            interpolation='nearest', origin='upper',
+                            extent=[angle_axis[0], angle_axis[-1], N_ranges-1, 0])
+        axes[2].set_xlabel('Angle (degrees)', fontsize=11)
+        axes[2].set_ylabel('Range Bin', fontsize=11)
+        axes[2].set_title('Network Output', fontsize=12, fontweight='bold')
+        plt.colorbar(im3, ax=axes[2])
+        
+        plt.tight_layout()
+        polar_comp_path = os.path.join(OUTPUT_DIR, 'comparison_gt_polar.png')
+        plt.savefig(polar_comp_path, dpi=DPI, bbox_inches='tight')
+        print(f"  Polar comparison saved to: {polar_comp_path}")
+        plt.close()
+        
+        # Compute polar domain metrics (for reference)
+        mse_polar = np.mean((x_gt_polar - reconstructed_image)**2)
+        nmse_polar = mse_polar / (np.mean(x_gt_polar**2) + 1e-10)
+        psnr_polar = 10 * np.log10(np.max(x_gt_polar)**2 / (mse_polar + 1e-10))
+        mae_polar = np.mean(np.abs(x_gt_polar - reconstructed_image))
+        
+        print(f"\n  Polar Domain Metrics:")
+        print(f"    MSE:  {mse_polar:.8f}")
+        print(f"    NMSE: {nmse_polar:.8f}")
+        print(f"    PSNR: {psnr_polar:.2f} dB")
+        print(f"    MAE:  {mae_polar:.8f}")
+        
+        # --- Figure 2: Cartesian Domain Comparison (if available) ---
+        if x_gt_cartesian is not None and cartesian_image is not None:
+            print("\nGenerating Cartesian domain comparison...")
+            
+            # Convert network input to Cartesian
+            print("Converting network input to Cartesian...")
+            network_input_cartesian = polar_to_cartesian(
+                network_input_polar, ranges, angles,
+                x_grid, y_grid, x_radar, y_radar,
+                method='cubic', verbose=False
+            )
+            
+            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            
+            # Network input
+            im1 = axes[0].imshow(network_input_cartesian, cmap=COLORMAP,
+                                extent=[x_grid.min(), x_grid.max(), y_grid.max(), y_grid.min()],
+                                interpolation='nearest', origin='upper')
+            axes[0].set_xlabel('X (meters)', fontsize=11)
+            axes[0].set_ylabel('Y (meters)', fontsize=11)
+            axes[0].set_title('Network Input (A^H @ y)\nMatched Filter', fontsize=12, fontweight='bold')
+            axes[0].set_aspect('equal')
+            plt.colorbar(im1, ax=axes[0])
+            
+            # Ground truth
+            im2 = axes[1].imshow(x_gt_cartesian, cmap=COLORMAP,
+                                extent=[x_grid.min(), x_grid.max(), y_grid.max(), y_grid.min()],
+                                interpolation='nearest', origin='upper')
+            axes[1].set_xlabel('X (meters)', fontsize=11)
+            axes[1].set_ylabel('Y (meters)', fontsize=11)
+            axes[1].set_title('Ground Truth', fontsize=12, fontweight='bold')
+            axes[1].set_aspect('equal')
+            plt.colorbar(im2, ax=axes[1])
+            
+            # Network output
+            im3 = axes[2].imshow(cartesian_image, cmap=COLORMAP,
+                                extent=[x_grid.min(), x_grid.max(), y_grid.max(), y_grid.min()],
+                                interpolation='nearest', origin='upper')
+            axes[2].set_xlabel('X (meters)', fontsize=11)
+            axes[2].set_ylabel('Y (meters)', fontsize=11)
+            axes[2].set_title('Network Output', fontsize=12, fontweight='bold')
+            axes[2].set_aspect('equal')
+            plt.colorbar(im3, ax=axes[2])
+            
+            plt.tight_layout()
+            cart_comp_path = os.path.join(OUTPUT_DIR, 'comparison_gt_cartesian.png')
+            plt.savefig(cart_comp_path, dpi=DPI, bbox_inches='tight')
+            print(f"  Cartesian comparison saved to: {cart_comp_path}")
+            plt.close()
+            
+            # Compute Cartesian domain metrics (for reference)
+            mse_cart = np.mean((x_gt_cartesian - cartesian_image)**2)
+            nmse_cart = mse_cart / (np.mean(x_gt_cartesian**2) + 1e-10)
+            psnr_cart = 10 * np.log10(np.max(x_gt_cartesian)**2 / (mse_cart + 1e-10))
+            mae_cart = np.mean(np.abs(x_gt_cartesian - cartesian_image))
+            
+            print(f"\n  Cartesian Domain Metrics:")
+            print(f"    MSE:  {mse_cart:.8f}")
+            print(f"    NMSE: {nmse_cart:.8f}")
+            print(f"    PSNR: {psnr_cart:.2f} dB")
+            print(f"    MAE:  {mae_cart:.8f}")
+        
+        print("\nGround truth comparison complete!")
     
     # -----------------------------------------------------------------
     # 6. Summary Statistics
