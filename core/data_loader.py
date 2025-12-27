@@ -280,6 +280,195 @@ class MIMOSAR_MultiPosition_Dataset(Dataset):
             return y_tensor
 
 
+class MultiRangeMIMOSAR_Dataset(Dataset):
+    """
+    Custom PyTorch Dataset for multi-range processing (without flattening ranges).
+    
+    Returns all range bins together as 3D tensors for joint processing by 2D CNNs.
+    This enables the denoiser to capture dependencies between different ranges.
+    
+    Expected data structure in MAT file (single or multi-position):
+        Single position:
+            - received_signals_fft: [N_ranges, N_v] measurements
+            - A: [N_v, N_theta] or [N_theta, N_v] steering matrix
+            - x: [N_ranges, N_theta] ground truth (optional)
+        Multi-position:
+            - N_positions: Number of radar positions
+            - position_1, position_2, ...: Each contains above fields
+    
+    Each sample is the full measurement matrix for one position: [N_ranges, 2, N_v]
+    Total samples = N_positions (not N_positions × N_ranges)
+    """
+    def __init__(self, mat_file_path, return_ground_truth=False):
+        return_ground_truth = True  # Always load GT if available
+        print(f"Loading multi-range data from {mat_file_path}...")
+        data = load_mat_file(mat_file_path)
+        
+        # Check if this is multi-position data
+        is_multi_position = 'N_positions' in data
+        
+        if is_multi_position:
+            N_positions = int(data['N_positions'])
+            print(f"  Multi-position data detected: {N_positions} positions")
+            
+            # Extract data from each position (keep ranges together)
+            self.measurements_list = []
+            self.ground_truth_list = []
+            
+            for pos_idx in range(1, N_positions + 1):
+                field_name = f'position_{pos_idx}'
+                
+                if field_name not in data:
+                    print(f"  WARNING: {field_name} not found, skipping...")
+                    continue
+                
+                pos_data = data[field_name]
+                
+                # Extract measurements [N_ranges, N_v]
+                measurements = pos_data['received_signals_fft']
+                self.measurements_list.append(measurements)
+                
+                # Extract ground truth if available [N_ranges, N_theta]
+                if return_ground_truth and 'x_polar' in pos_data:
+                    x_polar = pos_data['x_polar']
+                    self.ground_truth_list.append(x_polar)
+            
+            # Load steering matrix A from first position
+            first_pos_data = data['position_1']
+            A_from_matlab = first_pos_data['A']  # [N_theta, N_v] from MATLAB
+            A = A_from_matlab.T  # Transpose to [N_v, N_theta]
+            
+            self.num_samples = len(self.measurements_list)
+            
+        else:
+            # Single position: treat as one sample with all ranges
+            print(f"  Single position data detected")
+            
+            measurements = data['received_signals_fft']
+            
+            # Handle different shapes
+            if measurements.ndim == 2:
+                # [N_ranges, N_v]
+                self.measurements_list = [measurements]
+            elif measurements.ndim == 3:
+                # [N_ranges, N_v, N_samples] - split along sample dimension
+                N_samples = measurements.shape[2]
+                self.measurements_list = [measurements[:, :, i] for i in range(N_samples)]
+            else:
+                raise ValueError(f"Unexpected measurements shape: {measurements.shape}")
+            
+            # Load steering matrix
+            A_complex = data['A'].astype(np.complex64)
+            if A_complex.shape[0] < A_complex.shape[1]:
+                # [N_v, N_theta]
+                A = A_complex
+            else:
+                # [N_theta, N_v] - transpose
+                A = A_complex.T
+            
+            # Ground truth
+            self.ground_truth_list = []
+            if return_ground_truth and 'x' in data:
+                x = data['x']
+                if x.ndim == 2:
+                    # [N_ranges, N_theta]
+                    self.ground_truth_list = [x]
+                elif x.ndim == 3:
+                    # [N_ranges, N_theta, N_samples]
+                    N_samples = x.shape[2]
+                    self.ground_truth_list = [x[:, :, i] for i in range(N_samples)]
+            
+            self.num_samples = len(self.measurements_list)
+        
+        # Store metadata
+        self.A_complex = A.astype(np.complex64)
+        self.A = to_tensor(self.A_complex)  # Shape [2, N_v, N_theta]
+        self.num_virtual_ant = self.A.shape[1]
+        self.num_angle_bins = self.A.shape[2]
+        
+        # *** NEW: Find max range bins and pad all samples ***
+        max_ranges = max(meas.shape[0] for meas in self.measurements_list)
+        self.num_ranges = max_ranges
+        
+        # Store original range counts for masking
+        self.valid_range_counts = []
+        
+        # Pad measurements to max_ranges
+        padded_measurements = []
+        for meas in self.measurements_list:
+            N_ranges = meas.shape[0]
+            self.valid_range_counts.append(N_ranges)
+            if N_ranges < max_ranges:
+                # Pad with zeros: [N_ranges, N_v] -> [max_ranges, N_v]
+                pad_size = max_ranges - N_ranges
+                meas_padded = np.pad(meas, ((0, pad_size), (0, 0)), mode='constant', constant_values=0)
+                padded_measurements.append(meas_padded)
+            else:
+                padded_measurements.append(meas)
+        self.measurements_list = padded_measurements
+        
+        # Pad ground truth if available
+        if self.ground_truth_list:
+            padded_gt = []
+            for gt in self.ground_truth_list:
+                N_ranges = gt.shape[0]
+                if N_ranges < max_ranges:
+                    # Pad with zeros: [N_ranges, N_theta] -> [max_ranges, N_theta]
+                    pad_size = max_ranges - N_ranges
+                    gt_padded = np.pad(gt, ((0, pad_size), (0, 0)), mode='constant', constant_values=0)
+                    padded_gt.append(gt_padded)
+                else:
+                    padded_gt.append(gt)
+            self.ground_truth_list = padded_gt
+        
+        # Handle ground truth
+        self.return_ground_truth = return_ground_truth
+        self.has_ground_truth = len(self.ground_truth_list) == self.num_samples
+        
+        print(f"Multi-range data loaded successfully.")
+        print(f"  Total samples: {self.num_samples}")
+        print(f"  Range bins per sample: {self.num_ranges} (padded to max)")
+        print(f"  Virtual antennas (N_v): {self.num_virtual_ant}")
+        print(f"  Angle bins (N_theta): {self.num_angle_bins}")
+        print(f"  Steering matrix 'A' shape: {list(self.A.shape)}")
+        print(f"  Ground truth available: {self.has_ground_truth}")
+    
+    def __len__(self):
+        return self.num_samples
+    
+    def __getitem__(self, idx):
+        # Get all range measurements for this sample
+        y_complex = self.measurements_list[idx]  # Shape [N_ranges, N_v]
+        
+        # Convert to tensor: [N_ranges, 2, N_v]
+        y_tensor_list = []
+        for r_idx in range(y_complex.shape[0]):
+            y_r = to_tensor(y_complex[r_idx])  # [2, N_v]
+            y_tensor_list.append(y_r)
+        y_tensor = torch.stack(y_tensor_list, dim=0)  # [N_ranges, 2, N_v]
+        
+        # Create mask for valid ranges: [N_ranges]
+        # 1.0 for valid ranges, 0.0 for padded ranges
+        valid_count = self.valid_range_counts[idx]
+        mask = torch.zeros(y_tensor.shape[0], dtype=torch.float32)
+        mask[:valid_count] = 1.0
+        
+        # Optionally return ground truth x
+        if self.return_ground_truth and self.has_ground_truth:
+            x_complex = self.ground_truth_list[idx]  # Shape [N_ranges, N_theta]
+            
+            # Convert to tensor: [N_ranges, 2, N_theta]
+            x_tensor_list = []
+            for r_idx in range(x_complex.shape[0]):
+                x_r = to_tensor(x_complex[r_idx])  # [2, N_theta]
+                x_tensor_list.append(x_r)
+            x_tensor = torch.stack(x_tensor_list, dim=0)  # [N_ranges, 2, N_theta]
+            
+            return y_tensor, x_tensor, mask
+        else:
+            return y_tensor, mask
+
+
 def load_dataset_auto(mat_file_path, return_ground_truth=False):
     """
     Automatically detect and load the appropriate dataset type.
@@ -309,3 +498,28 @@ def load_dataset_auto(mat_file_path, return_ground_truth=False):
     else:
         print(f"Auto-detected: Single-position data")
         return MIMOSAR_Dataset(mat_file_path, return_ground_truth)
+
+
+def load_dataset_multirange(mat_file_path, return_ground_truth=False):
+    """
+    Load dataset for multi-range processing (all ranges together as 3D tensors).
+    
+    Use this when training with use_multi_range_denoiser=True.
+    Returns MultiRangeMIMOSAR_Dataset which provides samples of shape:
+        - Measurements: [N_ranges, 2, N_v]
+        - Ground truth: [N_ranges, 2, N_theta]
+    
+    Args:
+        mat_file_path: Path to .mat file
+        return_ground_truth: Whether to load ground truth if available
+    
+    Returns:
+        MultiRangeMIMOSAR_Dataset object
+    
+    Example:
+        >>> dataset = load_dataset_multirange('data/data_training_sar.mat')
+        Multi-position data detected: 10 positions
+        >>> y, x = dataset[0]
+        >>> print(y.shape)  # [57, 2, 8] - all ranges together
+    """
+    return MultiRangeMIMOSAR_Dataset(mat_file_path, return_ground_truth)

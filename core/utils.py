@@ -39,7 +39,7 @@ def complex_conj_transpose_matmul(A_tensor, y_tensor):
     """
     Performs complex conj-transpose matrix-vector multiplication: x = A.H @ y
     
-    A_tensor: [1, 2, N_v, N_theta] (complex matrix A, batched)
+    A_tensor: [1, 2, N_v, N_theta] OR [batch, 2, N_v, N_theta] (complex matrix A, batched)
     y_tensor: [batch, 2, N_v] (complex vector y)
     
     Returns:
@@ -47,10 +47,17 @@ def complex_conj_transpose_matmul(A_tensor, y_tensor):
     """
     # <<< FIX HERE: Get batch_size from y_tensor >>>
     batch_size = y_tensor.shape[0]
+    A_batch_size = A_tensor.shape[0]
 
-    # <<< FIX HERE: Expand A.T to match the batch size of y >>>
-    A_r_T = A_tensor[:, 0, :, :].transpose(1, 2).expand(batch_size, -1, -1)  # [batch, N_theta, N_v]
-    A_i_T = A_tensor[:, 1, :, :].transpose(1, 2).expand(batch_size, -1, -1)  # [batch, N_theta, N_v]
+    # <<< FIX HERE: Handle both single A and batch A >>>
+    if A_batch_size == 1:
+        # Original behavior: expand single A to match batch
+        A_r_T = A_tensor[:, 0, :, :].transpose(1, 2).expand(batch_size, -1, -1)  # [batch, N_theta, N_v]
+        A_i_T = A_tensor[:, 1, :, :].transpose(1, 2).expand(batch_size, -1, -1)  # [batch, N_theta, N_v]
+    else:
+        # New behavior: A is already batched, just transpose
+        A_r_T = A_tensor[:, 0, :, :].transpose(1, 2).contiguous()  # [batch, N_theta, N_v]
+        A_i_T = A_tensor[:, 1, :, :].transpose(1, 2).contiguous()  # [batch, N_theta, N_v]
 
     y_r = y_tensor[:, 0, :].unsqueeze(1)  # [batch, 1, N_v]
     y_i = y_tensor[:, 1, :].unsqueeze(1)  # [batch, 1, N_v]
