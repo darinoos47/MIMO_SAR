@@ -47,8 +47,8 @@ N_RANGES = 57     # Number of range bins (rows in polar image)
 N_V = 8           # Number of virtual antennas (measurements per range)
 
 # Training configuration
-NUM_TRAIN_SAMPLES = 1000    # Number of MNIST samples for training
-NUM_TEST_SAMPLES = 100      # Number of MNIST samples for testing
+NUM_TRAIN_SAMPLES = 10000    # Number of MNIST samples for training
+NUM_TEST_SAMPLES = 1000      # Number of MNIST samples for testing
 BATCH_SIZE = 32
 EPOCHS_SINGLE_RANGE = 100   # Epochs for single-range denoiser
 EPOCHS_MULTI_RANGE = 100    # Epochs for multi-range denoiser
@@ -62,6 +62,9 @@ ENFORCE_POSITIVITY = True   # ReLU at output
 OUTPUT_DIR = 'results/mnist_polar_comparison'
 SINGLE_RANGE_CHECKPOINT = 'checkpoints/mnist_single_range_denoiser.pth'
 MULTI_RANGE_CHECKPOINT = 'checkpoints/mnist_multi_range_denoiser.pth'
+
+# Dataset selection: 'mnist', 'fashion_mnist', or 'emnist'
+DATASET = 'emnist'
 
 # Random seed for reproducibility
 SEED = 42
@@ -111,11 +114,12 @@ def generate_steering_matrix(N_v, N_theta, device):
 # MNIST Data Pipeline
 # =============================================================================
 
-def load_mnist_polar(num_train, num_test, n_theta, n_ranges, device):
+def load_dataset_polar(dataset_name, num_train, num_test, n_theta, n_ranges, device):
     """
-    Load MNIST and resize to polar domain dimensions.
+    Load dataset (MNIST, Fashion-MNIST, or EMNIST) and resize to polar domain dimensions.
     
     Args:
+        dataset_name: 'mnist', 'fashion_mnist', or 'emnist'
         num_train: Number of training samples
         num_test: Number of test samples
         n_theta: Number of angle bins (width)
@@ -125,6 +129,7 @@ def load_mnist_polar(num_train, num_test, n_theta, n_ranges, device):
     Returns:
         train_images: [num_train, n_ranges, n_theta] tensor (real, positive)
         test_images: [num_test, n_ranges, n_theta] tensor (real, positive)
+        dataset_display_name: Human-readable name of the dataset
     """
     # Define transform to resize to polar dimensions
     transform = transforms.Compose([
@@ -132,20 +137,58 @@ def load_mnist_polar(num_train, num_test, n_theta, n_ranges, device):
         transforms.ToTensor(),  # Converts to [0, 1] range
     ])
     
-    # Download MNIST
-    train_dataset = torchvision.datasets.MNIST(
-        root='./data/mnist', 
-        train=True, 
-        download=True,
-        transform=transform
-    )
-    
-    test_dataset = torchvision.datasets.MNIST(
-        root='./data/mnist', 
-        train=False, 
-        download=True,
-        transform=transform
-    )
+    # Select dataset
+    if dataset_name.lower() == 'mnist':
+        train_dataset = torchvision.datasets.MNIST(
+            root='./data/mnist', 
+            train=True, 
+            download=True,
+            transform=transform
+        )
+        test_dataset = torchvision.datasets.MNIST(
+            root='./data/mnist', 
+            train=False, 
+            download=True,
+            transform=transform
+        )
+        display_name = "MNIST"
+        
+    elif dataset_name.lower() == 'fashion_mnist':
+        train_dataset = torchvision.datasets.FashionMNIST(
+            root='./data/fashion_mnist', 
+            train=True, 
+            download=True,
+            transform=transform
+        )
+        test_dataset = torchvision.datasets.FashionMNIST(
+            root='./data/fashion_mnist', 
+            train=False, 
+            download=True,
+            transform=transform
+        )
+        display_name = "Fashion-MNIST"
+        
+    elif dataset_name.lower() == 'emnist':
+        # EMNIST has multiple splits; using 'letters' for variety
+        train_dataset = torchvision.datasets.EMNIST(
+            root='./data/emnist', 
+            split='letters',
+            train=True, 
+            download=True,
+            transform=transform
+        )
+        test_dataset = torchvision.datasets.EMNIST(
+            root='./data/emnist', 
+            split='letters',
+            train=False, 
+            download=True,
+            transform=transform
+        )
+        display_name = "EMNIST (Letters)"
+        
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}. "
+                        f"Choose from: 'mnist', 'fashion_mnist', 'emnist'")
     
     # Extract subset of images
     train_images = []
@@ -160,7 +203,7 @@ def load_mnist_polar(num_train, num_test, n_theta, n_ranges, device):
         test_images.append(img.squeeze(0))
     test_images = torch.stack(test_images).to(device)  # [num_test, n_ranges, n_theta]
     
-    return train_images, test_images
+    return train_images, test_images, display_name
 
 
 def create_measurements(x_true, A_tensor):
@@ -475,7 +518,7 @@ def compute_metrics(x_true, x_recon):
     return mse, psnr, ssim
 
 
-def visualize_comparison(test_image, x_adj, x_single, x_multi, output_path, sample_idx=0):
+def visualize_comparison(test_image, x_adj, x_single, x_multi, output_path, sample_idx=0, dataset_name="MNIST"):
     """
     Create comparison visualization of reconstruction methods.
     
@@ -511,7 +554,7 @@ def visualize_comparison(test_image, x_adj, x_single, x_multi, output_path, samp
     
     # Ground Truth
     im0 = axes[0].imshow(x_true, aspect='auto', cmap='viridis', vmin=vmin_recon, vmax=vmax_recon)
-    axes[0].set_title('Ground Truth\n(MNIST in Polar Domain)', fontsize=11)
+    axes[0].set_title(f'Ground Truth\n({dataset_name} in Polar Domain)', fontsize=11)
     axes[0].set_xlabel('Angle Bin')
     axes[0].set_ylabel('Range Bin')
     plt.colorbar(im0, ax=axes[0], shrink=0.8)
@@ -661,11 +704,12 @@ def visualize_multiple_samples(test_images, single_model, multi_model, A_tensor,
 
 def main():
     print("="*70)
-    print("MNIST POLAR DOMAIN INVERSION COMPARISON")
+    print("POLAR DOMAIN INVERSION COMPARISON")
     print("Single-Range (1D) vs Multi-Range (2D) Denoiser")
     print("="*70)
     print(f"\nConfiguration:")
     print(f"  Device: {DEVICE}")
+    print(f"  Dataset: {DATASET}")
     print(f"  Polar dimensions: {N_RANGES} ranges × {N_THETA} angles")
     print(f"  Measurements per range: {N_V}")
     print(f"  Training samples: {NUM_TRAIN_SAMPLES}")
@@ -686,11 +730,12 @@ def main():
     print(f"A_tensor[1, 3, 23] is {A_tensor[1, 3, 23]}")
     print(f"  Steering matrix shape: {list(A_tensor.shape)}")
     
-    # Load MNIST data
-    print("\n[2] Loading MNIST data and resizing to polar domain...")
-    train_images, test_images = load_mnist_polar(
-        NUM_TRAIN_SAMPLES, NUM_TEST_SAMPLES, N_THETA, N_RANGES, DEVICE
+    # Load dataset
+    print(f"\n[2] Loading {DATASET} data and resizing to polar domain...")
+    train_images, test_images, dataset_display_name = load_dataset_polar(
+        DATASET, NUM_TRAIN_SAMPLES, NUM_TEST_SAMPLES, N_THETA, N_RANGES, DEVICE
     )
+    print(f"  Dataset: {dataset_display_name}")
     print(f"  Training images: {list(train_images.shape)}")
     print(f"  Test images: {list(test_images.shape)}")
     
@@ -745,7 +790,8 @@ def main():
         metrics = visualize_comparison(
             test_image[0], x_adj[0], x_single[0], x_multi[0],
             os.path.join(OUTPUT_DIR, 'reconstruction_comparison.png'),
-            sample_idx=test_idx
+            sample_idx=test_idx,
+            dataset_name=dataset_display_name
         )
     
     # Multiple sample visualization
