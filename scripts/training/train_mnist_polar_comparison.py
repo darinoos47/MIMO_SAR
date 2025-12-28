@@ -47,16 +47,19 @@ N_RANGES = 57     # Number of range bins (rows in polar image)
 N_V = 8           # Number of virtual antennas (measurements per range)
 
 # Training configuration
-NUM_TRAIN_SAMPLES = 10000    # Number of MNIST samples for training
-NUM_TEST_SAMPLES = 100      # Number of MNIST samples for testing
+NUM_TRAIN_SAMPLES = 1000    # Number of MNIST samples for training
+NUM_TEST_SAMPLES = 10      # Number of MNIST samples for testing
 BATCH_SIZE = 32
-EPOCHS_SINGLE_RANGE = 1   # Epochs for single-range denoiser
-EPOCHS_MULTI_RANGE = 1    # Epochs for multi-range denoiser
+EPOCHS_SINGLE_RANGE = 50   # Epochs for single-range denoiser
+EPOCHS_MULTI_RANGE = 50    # Epochs for multi-range denoiser
 LEARNING_RATE = 1e-3
 
 # Denoiser configuration
 NUM_FILTERS = 32            # Number of filters in first layer
 ENFORCE_POSITIVITY = True   # ReLU at output
+
+# Noise configuration
+NOISE_STD = 1  # Standard deviation of complex AWGN (0 = no noise)
 
 # Output paths
 OUTPUT_DIR = 'results/mnist_polar_comparison'
@@ -69,7 +72,7 @@ def get_checkpoint_path(model_type):
     return f'checkpoints/{DATASET}_{NETWORK_TYPE}_{model_type}.pth'
 
 # Dataset selection: 'mnist', 'fashion_mnist', or 'emnist'
-DATASET = 'fashion_mnist'
+DATASET = 'mnist'
 
 # Network architecture: 'cnn' or 'unet'
 NETWORK_TYPE = 'cnn'  # Options: 'cnn', 'unet'
@@ -348,13 +351,15 @@ def load_dataset_polar(dataset_name, num_train, num_test, n_theta, n_ranges, dev
     return train_images, test_images, display_name
 
 
-def create_measurements(x_true, A_tensor):
+def create_measurements(x_true, A_tensor, noise_std=0.0):
     """
     Generate measurements using forward model: y = A @ x for each range.
+    Optionally adds complex AWGN to the measurements.
     
     Args:
         x_true: Ground truth polar image [batch, N_ranges, N_theta] (real)
         A_tensor: Steering matrix [2, N_v, N_theta]
+        noise_std: Standard deviation of complex AWGN (0 = no noise)
         
     Returns:
         y: Measurements [batch, N_ranges, 2, N_v] (complex as 2 channels)
@@ -377,6 +382,14 @@ def create_measurements(x_true, A_tensor):
         y_list.append(y_r)
     
     y = torch.stack(y_list, dim=1)  # [batch, N_ranges, 2, N_v]
+    
+    # Add complex AWGN if noise_std > 0
+    if noise_std > 0:
+        noise_real = torch.randn_like(y[:, :, 0, :]) * noise_std
+        noise_imag = torch.randn_like(y[:, :, 1, :]) * noise_std
+        y[:, :, 0, :] = y[:, :, 0, :] + noise_real
+        y[:, :, 1, :] = y[:, :, 1, :] + noise_imag
+    
     return y
 
 
@@ -489,7 +502,7 @@ def train_single_range_denoiser(train_images, A_tensor, epochs, device):
     
     # Create measurements
     print("\n  Creating measurements from training images...")
-    y_train = create_measurements(train_images, A_tensor)  # [N, N_ranges, 2, N_v]
+    y_train = create_measurements(train_images, A_tensor, noise_std=NOISE_STD)  # [N, N_ranges, 2, N_v]
     x_adj_train = apply_adjoint(y_train, A_tensor)  # [N, N_ranges, 2, N_theta]
     
     # Create dataloader
@@ -620,7 +633,7 @@ def train_multi_range_denoiser(train_images, A_tensor, epochs, device):
     
     # Create measurements
     print("\n  Creating measurements from training images...")
-    y_train = create_measurements(train_images, A_tensor)  # [N, N_ranges, 2, N_v]
+    y_train = create_measurements(train_images, A_tensor, noise_std=NOISE_STD)  # [N, N_ranges, 2, N_v]
     x_adj_train = apply_adjoint(y_train, A_tensor)  # [N, N_ranges, 2, N_theta]
     
     # Create dataloader
@@ -874,7 +887,7 @@ def visualize_multiple_samples(test_images, single_model, multi_model, A_tensor,
             test_image = test_images[i:i+1]  # [1, N_ranges, N_theta]
             
             # Generate measurements and adjoint
-            y = create_measurements(test_image, A_tensor)
+            y = create_measurements(test_image, A_tensor, noise_std=NOISE_STD)
             x_adj = apply_adjoint(y, A_tensor)
             
             # Apply denoisers
@@ -1001,7 +1014,7 @@ def main():
         test_image = test_images[test_idx:test_idx+1]  # [1, N_ranges, N_theta]
         
         # Generate measurements and adjoint
-        y_test = create_measurements(test_image, A_tensor)
+        y_test = create_measurements(test_image, A_tensor, noise_std=NOISE_STD)
         x_adj = apply_adjoint(y_test, A_tensor)
         
         # Apply denoisers
