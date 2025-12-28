@@ -48,10 +48,10 @@ N_V = 8           # Number of virtual antennas (measurements per range)
 
 # Training configuration
 NUM_TRAIN_SAMPLES = 10000    # Number of MNIST samples for training
-NUM_TEST_SAMPLES = 1000      # Number of MNIST samples for testing
+NUM_TEST_SAMPLES = 100      # Number of MNIST samples for testing
 BATCH_SIZE = 32
-EPOCHS_SINGLE_RANGE = 100   # Epochs for single-range denoiser
-EPOCHS_MULTI_RANGE = 100    # Epochs for multi-range denoiser
+EPOCHS_SINGLE_RANGE = 1   # Epochs for single-range denoiser
+EPOCHS_MULTI_RANGE = 1    # Epochs for multi-range denoiser
 LEARNING_RATE = 1e-3
 
 # Denoiser configuration
@@ -60,14 +60,156 @@ ENFORCE_POSITIVITY = True   # ReLU at output
 
 # Output paths
 OUTPUT_DIR = 'results/mnist_polar_comparison'
-SINGLE_RANGE_CHECKPOINT = 'checkpoints/mnist_single_range_denoiser.pth'
-MULTI_RANGE_CHECKPOINT = 'checkpoints/mnist_multi_range_denoiser.pth'
+
+# Checkpoint configuration
+CHECKPOINT_INTERVAL = 10  # Save checkpoint every N epochs
+
+def get_checkpoint_path(model_type):
+    """Generate checkpoint path based on dataset and network type."""
+    return f'checkpoints/{DATASET}_{NETWORK_TYPE}_{model_type}.pth'
 
 # Dataset selection: 'mnist', 'fashion_mnist', or 'emnist'
-DATASET = 'emnist'
+DATASET = 'fashion_mnist'
+
+# Network architecture: 'cnn' or 'unet'
+NETWORK_TYPE = 'cnn'  # Options: 'cnn', 'unet'
 
 # Random seed for reproducibility
 SEED = 42
+
+# =============================================================================
+# UNet Wrapper Classes
+# =============================================================================
+
+class UNetDenoiser2D(nn.Module):
+    """
+    UNet-based denoiser for 2D (multi-range) processing.
+    
+    Uses pre-trained UNet architecture from torch.hub with ReLU for positivity.
+    Handles padding to ensure dimensions are divisible by 16.
+    """
+    def __init__(self, in_channels=2, out_channels=1, init_features=32, enforce_positivity=True):
+        super().__init__()
+        self.enforce_positivity = enforce_positivity
+        self.relu = nn.ReLU()
+        
+        # Load UNet from torch hub
+        self.unet = torch.hub.load(
+            'mateuszbuda/brain-segmentation-pytorch', 'unet',
+            in_channels=in_channels,
+            out_channels=out_channels,
+            init_features=init_features,
+            pretrained=False
+        )
+    
+    def _pad_to_multiple(self, x, multiple=16):
+        """Pad input to be divisible by multiple."""
+        _, _, h, w = x.shape
+        pad_h = (multiple - h % multiple) % multiple
+        pad_w = (multiple - w % multiple) % multiple
+        if pad_h > 0 or pad_w > 0:
+            x = nn.functional.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
+        return x, h, w
+    
+    def forward(self, x):
+        """
+        Args:
+            x: [batch, N_ranges, 2, N_theta] - adjoint image
+            
+        Returns:
+            x_out: [batch, N_ranges, 2, N_theta] - denoised image
+        """
+        batch_size, N_ranges, _, N_theta = x.shape
+        
+        # Reshape: [batch, N_ranges, 2, N_theta] -> [batch, 2, N_ranges, N_theta]
+        x = x.permute(0, 2, 1, 3)
+        
+        # Pad to multiple of 16
+        x_padded, orig_h, orig_w = self._pad_to_multiple(x, 16)
+        
+        # Apply UNet
+        out = self.unet(x_padded)  # [batch, 1, H_padded, W_padded]
+        
+        # Crop back to original size
+        out = out[:, :, :orig_h, :orig_w]  # [batch, 1, N_ranges, N_theta]
+        
+        # Apply positivity
+        if self.enforce_positivity:
+            out = self.relu(out)
+        
+        # Create 2-channel output (real part only, imag=0)
+        x_out = torch.zeros(batch_size, 2, N_ranges, N_theta, device=x.device)
+        x_out[:, 0, :, :] = out.squeeze(1)
+        
+        # Reshape back: [batch, 2, N_ranges, N_theta] -> [batch, N_ranges, 2, N_theta]
+        x_out = x_out.permute(0, 2, 1, 3)
+        
+        return x_out
+
+
+class UNetDenoiser1D(nn.Module):
+    """
+    UNet-based denoiser for 1D (single-range) processing.
+    
+    Replicates 1D signal to 16-pixel height for UNet compatibility (minimum for pooling).
+    """
+    def __init__(self, in_channels=2, out_channels=1, init_features=32, enforce_positivity=True):
+        super().__init__()
+        self.enforce_positivity = enforce_positivity
+        self.relu = nn.ReLU()
+        self.min_height = 16  # Minimum height for UNet pooling
+        
+        # Load UNet from torch hub
+        self.unet = torch.hub.load(
+            'mateuszbuda/brain-segmentation-pytorch', 'unet',
+            in_channels=in_channels,
+            out_channels=out_channels,
+            init_features=init_features,
+            pretrained=False
+        )
+    
+    def _pad_to_multiple(self, x, multiple=16):
+        """Pad input to be divisible by multiple."""
+        _, _, h, w = x.shape
+        pad_h = (multiple - h % multiple) % multiple
+        pad_w = (multiple - w % multiple) % multiple
+        if pad_h > 0 or pad_w > 0:
+            x = nn.functional.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0)
+        return x, h, w
+    
+    def forward(self, x):
+        """
+        Args:
+            x: [batch, 2, N_theta] - single range adjoint
+            
+        Returns:
+            x_out: [batch, 2, N_theta] - denoised range
+        """
+        batch_size, _, N_theta = x.shape
+        
+        # Replicate to create minimum height: [batch, 2, N_theta] -> [batch, 2, min_height, N_theta]
+        x = x.unsqueeze(2).repeat(1, 1, self.min_height, 1)
+        
+        # Pad width to multiple of 16
+        x_padded, orig_h, orig_w = self._pad_to_multiple(x, 16)
+        
+        # Apply UNet
+        out = self.unet(x_padded)  # [batch, 1, H_padded, W_padded]
+        
+        # Crop back to original size
+        out = out[:, :, :orig_h, :orig_w]  # [batch, 1, min_height, N_theta]
+        
+        # Apply positivity
+        if self.enforce_positivity:
+            out = self.relu(out)
+        
+        # Average over height dimension and create 2-channel output
+        out = out.mean(dim=2)  # [batch, 1, N_theta]
+        x_out = torch.zeros(batch_size, 2, N_theta, device=x.device)
+        x_out[:, 0, :] = out.squeeze(1)
+        
+        return x_out
+
 
 # =============================================================================
 # Steering Matrix Generation
@@ -317,16 +459,25 @@ def train_single_range_denoiser(train_images, A_tensor, epochs, device):
         losses: List of training losses
     """
     print("\n" + "="*70)
-    print("TRAINING SINGLE-RANGE DENOISER (Method 1: 1D CNN)")
+    arch_name = "UNet" if NETWORK_TYPE == 'unet' else "1D CNN"
+    print(f"TRAINING SINGLE-RANGE DENOISER (Method 1: {arch_name})")
     print("="*70)
     
-    # Create denoiser
-    denoiser_1d = CNNDenoiser_RealOutput(
-        in_channels=2,
-        out_channels=1,
-        num_filters=NUM_FILTERS,
-        enforce_positivity=ENFORCE_POSITIVITY
-    ).to(device)
+    # Create denoiser based on network type
+    if NETWORK_TYPE == 'unet':
+        denoiser_1d = UNetDenoiser1D(
+            in_channels=2,
+            out_channels=1,
+            init_features=NUM_FILTERS,
+            enforce_positivity=ENFORCE_POSITIVITY
+        ).to(device)
+    else:
+        denoiser_1d = CNNDenoiser_RealOutput(
+            in_channels=2,
+            out_channels=1,
+            num_filters=NUM_FILTERS,
+            enforce_positivity=ENFORCE_POSITIVITY
+        ).to(device)
     
     model = SingleRangeWrapper(denoiser_1d).to(device)
     
@@ -348,12 +499,36 @@ def train_single_range_denoiser(train_images, A_tensor, epochs, device):
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
+    # Check for existing checkpoint and resume if available
+    start_epoch = 0
+    losses = []
+    checkpoint_path = get_checkpoint_path('single_range')
+    
+    if os.path.exists(checkpoint_path):
+        print(f"  Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # Handle both old format (just state dict) and new format (full checkpoint)
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            losses = checkpoint['losses']
+            print(f"  Resuming from epoch {start_epoch}")
+        else:
+            # Old format: checkpoint is just the state dict
+            model.load_state_dict(checkpoint)
+            print(f"  Loaded old-format checkpoint (starting fresh from epoch 0)")
+    
+    # Skip training if already completed
+    if start_epoch >= epochs:
+        print(f"  Training already completed ({start_epoch} epochs)")
+        return model, losses
+    
     # Training loop
     model.train()
-    losses = []
     A_batch = A_tensor.unsqueeze(0)
     
-    pbar = tqdm(range(epochs), desc="  Training")
+    pbar = tqdm(range(start_epoch, epochs), desc="  Training")
     for epoch in pbar:
         epoch_loss = 0.0
         for x_adj_batch, y_batch in dataloader:
@@ -381,6 +556,16 @@ def train_single_range_denoiser(train_images, A_tensor, epochs, device):
         avg_loss = epoch_loss / len(dataloader)
         losses.append(avg_loss)
         pbar.set_postfix({'loss': f'{avg_loss:.6f}'})
+        
+        # Save checkpoint every CHECKPOINT_INTERVAL epochs
+        if (epoch + 1) % CHECKPOINT_INTERVAL == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'losses': losses,
+            }, checkpoint_path)
+            pbar.write(f"  Checkpoint saved at epoch {epoch + 1}")
     
     print(f"\n  Final loss: {losses[-1]:.6f}")
     
@@ -408,15 +593,24 @@ def train_multi_range_denoiser(train_images, A_tensor, epochs, device):
         losses: List of training losses
     """
     print("\n" + "="*70)
-    print("TRAINING MULTI-RANGE DENOISER (Method 2: 2D CNN)")
+    arch_name = "UNet" if NETWORK_TYPE == 'unet' else "2D CNN"
+    print(f"TRAINING MULTI-RANGE DENOISER (Method 2: {arch_name})")
     print("="*70)
     
-    # Create denoiser
-    model = MultiRangeDenoiser(
-        num_filters=NUM_FILTERS,
-        enforce_positivity=ENFORCE_POSITIVITY,
-        output_real_only=True
-    ).to(device)
+    # Create denoiser based on network type
+    if NETWORK_TYPE == 'unet':
+        model = UNetDenoiser2D(
+            in_channels=2,
+            out_channels=1,
+            init_features=NUM_FILTERS,
+            enforce_positivity=ENFORCE_POSITIVITY
+        ).to(device)
+    else:
+        model = MultiRangeDenoiser(
+            num_filters=NUM_FILTERS,
+            enforce_positivity=ENFORCE_POSITIVITY,
+            output_real_only=True
+        ).to(device)
     
     # Count parameters
     num_params = sum(p.numel() for p in model.parameters())
@@ -436,12 +630,36 @@ def train_multi_range_denoiser(train_images, A_tensor, epochs, device):
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
+    # Check for existing checkpoint and resume if available
+    start_epoch = 0
+    losses = []
+    checkpoint_path = get_checkpoint_path('multi_range')
+    
+    if os.path.exists(checkpoint_path):
+        print(f"  Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # Handle both old format (just state dict) and new format (full checkpoint)
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            losses = checkpoint['losses']
+            print(f"  Resuming from epoch {start_epoch}")
+        else:
+            # Old format: checkpoint is just the state dict
+            model.load_state_dict(checkpoint)
+            print(f"  Loaded old-format checkpoint (starting fresh from epoch 0)")
+    
+    # Skip training if already completed
+    if start_epoch >= epochs:
+        print(f"  Training already completed ({start_epoch} epochs)")
+        return model, losses
+    
     # Training loop
     model.train()
-    losses = []
     A_batch = A_tensor.unsqueeze(0)
     
-    pbar = tqdm(range(epochs), desc="  Training")
+    pbar = tqdm(range(start_epoch, epochs), desc="  Training")
     for epoch in pbar:
         epoch_loss = 0.0
         for x_adj_batch, y_batch in dataloader:
@@ -469,6 +687,16 @@ def train_multi_range_denoiser(train_images, A_tensor, epochs, device):
         avg_loss = epoch_loss / len(dataloader)
         losses.append(avg_loss)
         pbar.set_postfix({'loss': f'{avg_loss:.6f}'})
+        
+        # Save checkpoint every CHECKPOINT_INTERVAL epochs
+        if (epoch + 1) % CHECKPOINT_INTERVAL == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'losses': losses,
+            }, checkpoint_path)
+            pbar.write(f"  Checkpoint saved at epoch {epoch + 1}")
     
     print(f"\n  Final loss: {losses[-1]:.6f}")
     
@@ -659,38 +887,30 @@ def visualize_multiple_samples(test_images, single_model, multi_model, A_tensor,
             x_single_real = x_single[0, :, 0, :].cpu().numpy()
             x_multi_real = x_multi[0, :, 0, :].cpu().numpy()
             
-            # Compute metrics
-            mse_single, psnr_single, _ = compute_metrics(test_image[0], x_single[0, :, 0, :])
-            mse_multi, psnr_multi, _ = compute_metrics(test_image[0], x_multi[0, :, 0, :])
-            
             # Color scale for reconstructions (ground truth range)
             vmax_recon = max(x_true.max(), x_single_real.max(), x_multi_real.max())
             # Separate scale for adjoint
             vmax_adj = x_adj_real.max()
             
             # Plot
-            axes[i, 0].imshow(x_true, aspect='auto', cmap='viridis', vmin=0, vmax=vmax_recon)
-            axes[i, 0].set_title('Ground Truth' if i == 0 else '')
-            axes[i, 0].set_ylabel(f'Sample {i+1}')
+            axes[i, 0].imshow(x_true, aspect='auto', cmap='turbo', vmin=0, vmax=vmax_recon)
+            axes[i, 0].set_title('Ground Truth' if i == 0 else '', fontsize=16, fontweight='bold')
+            axes[i, 0].set_ylabel(f'Sample {i+1}', fontsize=16, fontweight='bold')
             
-            axes[i, 1].imshow(x_adj_real, aspect='auto', cmap='viridis', vmin=0, vmax=vmax_adj)
-            axes[i, 1].set_title('Adjoint (diff. scale)' if i == 0 else '')
+            axes[i, 1].imshow(x_adj_real, aspect='auto', cmap='turbo', vmin=0, vmax=vmax_adj)
+            axes[i, 1].set_title('Input' if i == 0 else '', fontsize=16, fontweight='bold')
             
-            axes[i, 2].imshow(x_single_real, aspect='auto', cmap='viridis', vmin=0, vmax=vmax_recon)
-            axes[i, 2].set_title(f'1D CNN' if i == 0 else '')
-            axes[i, 2].text(0.5, -0.15, f'PSNR={psnr_single:.1f}dB', 
-                           transform=axes[i, 2].transAxes, ha='center', fontsize=9)
+            axes[i, 2].imshow(x_single_real, aspect='auto', cmap='turbo', vmin=0, vmax=vmax_recon)
+            axes[i, 2].set_title('Single-range Output' if i == 0 else '', fontsize=16, fontweight='bold')
             
-            axes[i, 3].imshow(x_multi_real, aspect='auto', cmap='viridis', vmin=0, vmax=vmax_recon)
-            axes[i, 3].set_title(f'2D CNN' if i == 0 else '')
-            axes[i, 3].text(0.5, -0.15, f'PSNR={psnr_multi:.1f}dB', 
-                           transform=axes[i, 3].transAxes, ha='center', fontsize=9)
+            axes[i, 3].imshow(x_multi_real, aspect='auto', cmap='turbo', vmin=0, vmax=vmax_recon)
+            axes[i, 3].set_title('Multi-range Output' if i == 0 else '', fontsize=16, fontweight='bold')
     
     for ax in axes.flat:
         ax.set_xticks([])
         ax.set_yticks([])
     
-    plt.suptitle('Multi-Sample Reconstruction Comparison', fontsize=13, fontweight='bold')
+    #plt.suptitle('Multi-Sample Reconstruction Comparison', fontsize=16, fontweight='bold')
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -745,8 +965,9 @@ def main():
     )
     
     # Save single-range model
-    torch.save(single_model.state_dict(), SINGLE_RANGE_CHECKPOINT)
-    print(f"  Saved model to: {SINGLE_RANGE_CHECKPOINT}")
+    single_checkpoint_path = get_checkpoint_path('single_range')
+    torch.save(single_model.state_dict(), single_checkpoint_path)
+    print(f"  Saved model to: {single_checkpoint_path}")
     
     # Train multi-range denoiser
     multi_model, losses_multi = train_multi_range_denoiser(
@@ -754,8 +975,9 @@ def main():
     )
     
     # Save multi-range model
-    torch.save(multi_model.state_dict(), MULTI_RANGE_CHECKPOINT)
-    print(f"  Saved model to: {MULTI_RANGE_CHECKPOINT}")
+    multi_checkpoint_path = get_checkpoint_path('multi_range')
+    torch.save(multi_model.state_dict(), multi_checkpoint_path)
+    print(f"  Saved model to: {multi_checkpoint_path}")
     
     # Visualization
     print("\n" + "="*70)
@@ -811,8 +1033,8 @@ def main():
     print("  - multi_sample_comparison.png")
     print("  - training_curves.png")
     print(f"\nCheckpoints saved to:")
-    print(f"  - {SINGLE_RANGE_CHECKPOINT}")
-    print(f"  - {MULTI_RANGE_CHECKPOINT}")
+    print(f"  - {get_checkpoint_path('single_range')}")
+    print(f"  - {get_checkpoint_path('multi_range')}")
     
     # Print final comparison
     improvement_mse = (metrics['single_range']['mse'] - metrics['multi_range']['mse']) / metrics['single_range']['mse'] * 100
